@@ -17,6 +17,14 @@ Assert-Contains $install 'configure_egress_policy()' 'installer prompts for egre
 Assert-Contains $install 'Select proxy egress mode [direct/socks5' 'interactive egress mode selector'
 Assert-Contains $install 'SOCKS5 outbound address, ip:port' 'interactive SOCKS5 address prompt'
 Assert-Contains $install 'validate_socks5_addr()' 'SOCKS5 address validation'
+Assert-Contains $install 'configure_xray_policy()' 'optional Xray policy prompt'
+Assert-Contains $install 'install_xray_if_requested()' 'optional Xray installer'
+Assert-Contains $install 'https://github.com/XTLS/Xray-install/raw/main/install-release.sh' 'official Xray installer URL'
+Assert-Contains $install '/usr/local/etc/xray/config.json' 'Xray config path'
+Assert-Contains $install 'split_host_port "$EGRESS_SOCKS5_ADDR" inbound_host inbound_port' 'Xray inbound follows SOCKS5 address'
+Assert-Contains $install 'SS2022_ADDRESS is required when XRAY_INSTALL=yes' 'required SS2022 address'
+Assert-Contains $install 'SS2022_METHOD is required when XRAY_INSTALL=yes' 'required SS2022 method'
+Assert-Contains $install '"protocol": "shadowsocks"' 'Xray shadowsocks outbound'
 Assert-Contains $install 'EGRESS_MODE="${EGRESS_MODE:-direct}"' 'direct egress default'
 Assert-Contains $install 'EGRESS_SOCKS5_ADDR="${EGRESS_SOCKS5_ADDR:-127.0.0.1:1080}"' 'SOCKS5 default address'
 Assert-Contains $install 'systemctl restart 5gpn-tcp-proxy' 'socks5 mode starts TCP proxy'
@@ -34,6 +42,8 @@ Assert-Contains $quic 'dialSOCKS5UDPAssociate' 'SOCKS5 UDP associate implementat
 Assert-Contains $quic 'wrapSOCKS5UDP' 'SOCKS5 UDP packet wrapper'
 Assert-Contains $quic 'unwrapSOCKS5UDP' 'SOCKS5 UDP packet unwrapper'
 Assert-Contains $readme 'EGRESS_MODE=socks5' 'README documents SOCKS5 egress'
+Assert-Contains $readme 'XRAY_INSTALL=yes' 'README documents optional Xray install'
+Assert-Contains $readme 'SS2022_METHOD' 'README documents SS2022 method'
 Assert-Contains $readme 'UDP/443 QUIC' 'README documents UDP SOCKS5 egress'
 
 Write-Output "TCP proxy egress markers OK"

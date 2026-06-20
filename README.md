@@ -183,6 +183,19 @@ export EGRESS_SOCKS5_ADDR="127.0.0.1:1080"
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/panghuchi/5GPN/main/install.sh)"
 ```
 
+如果选择由安装脚本同时安装 Xray，脚本会使用官方安装器安装 Xray，并写入 `/usr/local/etc/xray/config.json`。Xray inbound 会监听前面填写的 SOCKS5 地址，outbound 会按交互输入的 SS2022 参数生成：
+
+```bash
+export EGRESS_MODE=socks5
+export EGRESS_SOCKS5_ADDR="127.0.0.1:1080"
+export XRAY_INSTALL=yes
+export SS2022_ADDRESS="64.118.147.55"
+export SS2022_PORT="48086"
+export SS2022_METHOD="2022-blake3-aes-128-gcm"
+export SS2022_PASSWORD="your-password"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/panghuchi/5GPN/main/install.sh)"
+```
+
 也可以安装后修改：
 
 ```bash

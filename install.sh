@@ -26,6 +26,11 @@ EGRESS_MODE="${EGRESS_MODE:-direct}"
 EGRESS_SOCKS5_ADDR="${EGRESS_SOCKS5_ADDR:-127.0.0.1:1080}"
 EGRESS_SOCKS5_USERNAME="${EGRESS_SOCKS5_USERNAME:-}"
 EGRESS_SOCKS5_PASSWORD="${EGRESS_SOCKS5_PASSWORD:-}"
+XRAY_INSTALL="${XRAY_INSTALL:-}"
+SS2022_ADDRESS="${SS2022_ADDRESS:-}"
+SS2022_PORT="${SS2022_PORT:-}"
+SS2022_METHOD="${SS2022_METHOD:-}"
+SS2022_PASSWORD="${SS2022_PASSWORD:-}"
 
 REPO_OWNER="${REPO_OWNER:-panghuchi}"
 REPO_NAME="${REPO_NAME:-5GPN}"
@@ -252,6 +257,42 @@ validate_socks5_addr() {
     (( port >= 1 && port <= 65535 )) || return 1
 }
 
+normalize_yes_no() {
+    local value="${1:-no}"
+    value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+    value="${value//[[:space:]]/}"
+    case "$value" in
+        y|yes|1|true|on) value="yes" ;;
+        n|no|0|false|off|"") value="no" ;;
+    esac
+    printf '%s\n' "$value"
+}
+
+split_host_port() {
+    local value="$1"
+    local __host_var="$2"
+    local __port_var="$3"
+    local host port
+
+    host="${value%:*}"
+    port="${value##*:}"
+    printf -v "$__host_var" '%s' "$host"
+    printf -v "$__port_var" '%s' "$port"
+}
+
+prompt_required() {
+    local prompt="$1"
+    local value=""
+
+    while [[ -z "$value" ]]; do
+        read -r -p "$prompt" value
+        if [[ -z "$value" ]]; then
+            warn "This value is required."
+        fi
+    done
+    printf '%s\n' "$value"
+}
+
 write_egress_env() {
     mkdir -p "$CONF_DIR"
     cat > "${CONF_DIR}/egress.env" <<EOF
@@ -309,6 +350,133 @@ configure_egress_policy() {
         info "Proxy egress mode: direct from this VPS"
     fi
     note "Proxy egress policy saved to ${CONF_DIR}/egress.env"
+}
+
+configure_xray_policy() {
+    local selected input
+    selected="$(normalize_yes_no "${XRAY_INSTALL:-no}")"
+
+    if [[ "$EGRESS_MODE" != "socks5" ]]; then
+        XRAY_INSTALL="no"
+        note "Xray install skipped because proxy egress mode is direct."
+        return 0
+    fi
+
+    if [[ -t 0 ]]; then
+        echo ""
+        read -r -p "Install local Xray SOCKS5 -> SS2022 outbound? [y/N]: " input
+        if [[ -n "$input" ]]; then
+            selected="$(normalize_yes_no "$input")"
+        fi
+    fi
+
+    case "$selected" in
+        yes|no) ;;
+        *) err "Invalid XRAY_INSTALL: ${selected}. Use yes or no."; exit 1 ;;
+    esac
+
+    XRAY_INSTALL="$selected"
+    if [[ "$XRAY_INSTALL" != "yes" ]]; then
+        note "Xray install skipped; make sure ${EGRESS_SOCKS5_ADDR} is provided by another SOCKS5 service."
+        return 0
+    fi
+
+    if [[ -t 0 ]]; then
+        [[ -z "$SS2022_ADDRESS" ]] && SS2022_ADDRESS="$(prompt_required "SS2022 server address: ")"
+        [[ -z "$SS2022_PORT" ]] && SS2022_PORT="$(prompt_required "SS2022 server port: ")"
+        [[ -z "$SS2022_METHOD" ]] && SS2022_METHOD="$(prompt_required "SS2022 method: ")"
+        [[ -z "$SS2022_PASSWORD" ]] && SS2022_PASSWORD="$(prompt_required "SS2022 password: ")"
+    fi
+
+    [[ -n "$SS2022_ADDRESS" ]] || { err "SS2022_ADDRESS is required when XRAY_INSTALL=yes."; exit 1; }
+    [[ "$SS2022_PORT" =~ ^[0-9]+$ ]] || { err "SS2022_PORT must be a number."; exit 1; }
+    (( SS2022_PORT >= 1 && SS2022_PORT <= 65535 )) || { err "SS2022_PORT must be between 1 and 65535."; exit 1; }
+    [[ -n "$SS2022_METHOD" ]] || { err "SS2022_METHOD is required when XRAY_INSTALL=yes."; exit 1; }
+    [[ -n "$SS2022_PASSWORD" ]] || { err "SS2022_PASSWORD is required when XRAY_INSTALL=yes."; exit 1; }
+
+    info "Xray will listen on SOCKS5 ${EGRESS_SOCKS5_ADDR} and forward to SS2022 ${SS2022_ADDRESS}:${SS2022_PORT}"
+}
+
+render_xray_config() {
+    local inbound_host inbound_port
+    split_host_port "$EGRESS_SOCKS5_ADDR" inbound_host inbound_port
+
+    mkdir -p /usr/local/etc/xray
+    python3 - "$inbound_host" "$inbound_port" "$SS2022_ADDRESS" "$SS2022_PORT" "$SS2022_METHOD" "$SS2022_PASSWORD" /usr/local/etc/xray/config.json <<'PYEOF'
+import json
+import sys
+
+inbound_host, inbound_port, ss_addr, ss_port, ss_method, ss_password, output = sys.argv[1:]
+config = {
+    "inbounds": [
+        {
+            "protocol": "socks",
+            "listen": inbound_host,
+            "port": int(inbound_port),
+            "tag": "socks5-in",
+            "settings": {
+                "auth": "noauth",
+                "udp": True,
+                "ip": inbound_host,
+                "userLevel": 0,
+            },
+        }
+    ],
+    "log": {
+        "loglevel": "warning",
+    },
+    "outbounds": [
+        {
+            "protocol": "freedom",
+            "settings": {
+                "domainStrategy": "UseIPv4v6",
+            },
+        },
+        {
+            "protocol": "shadowsocks",
+            "settings": {
+                "address": ss_addr,
+                "method": ss_method,
+                "password": ss_password,
+                "port": int(ss_port),
+            },
+            "tag": "ss2022-out",
+        },
+    ],
+    "routing": {
+        "rules": [
+            {
+                "inboundTag": ["socks5-in"],
+                "outboundTag": "ss2022-out",
+                "type": "field",
+            }
+        ],
+    },
+}
+with open(output, "w", encoding="utf-8") as fh:
+    json.dump(config, fh, ensure_ascii=False, indent=2)
+    fh.write("\n")
+PYEOF
+    chmod 600 /usr/local/etc/xray/config.json
+}
+
+install_xray_if_requested() {
+    [[ "$XRAY_INSTALL" == "yes" ]] || return 0
+
+    info "Installing Xray official release..."
+    local installer
+    installer="$(mktemp /tmp/xray-install.XXXXXX.sh)"
+    curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh -o "$installer"
+    chmod +x "$installer"
+    run_quiet "Running Xray official installer..." bash "$installer" install
+    rm -f "$installer"
+
+    render_xray_config
+    mkdir -p "$CONF_DIR"
+    touch "${CONF_DIR}/.xray_managed"
+    systemctl enable xray
+    systemctl restart xray || { err "xray failed to start"; journalctl -u xray --no-pager -n 30; exit 1; }
+    ok "Xray installed and configured: ${EGRESS_SOCKS5_ADDR} -> ${SS2022_ADDRESS}:${SS2022_PORT}"
 }
 
 
@@ -404,6 +572,11 @@ Environment variables (for non-interactive use):
   EGRESS_SOCKS5_ADDR      SOCKS5 outbound address (ip:port) when EGRESS_MODE=socks5
   EGRESS_SOCKS5_USERNAME  Optional SOCKS5 username
   EGRESS_SOCKS5_PASSWORD  Optional SOCKS5 password
+  XRAY_INSTALL  Install local Xray SOCKS5 -> SS2022 outbound when set to 1/yes
+  SS2022_ADDRESS Required SS2022 server address when XRAY_INSTALL=yes
+  SS2022_PORT    Required SS2022 server port when XRAY_INSTALL=yes
+  SS2022_METHOD  Required SS2022 method when XRAY_INSTALL=yes
+  SS2022_PASSWORD Required SS2022 password when XRAY_INSTALL=yes
   EMAIL          Email for Let's Encrypt
 EOF
 }
@@ -1510,6 +1683,9 @@ start_services() {
     info "Starting services..."
     systemctl restart china-dns-race-proxy || { err "china-dns-race-proxy failed to start"; journalctl -u china-dns-race-proxy --no-pager -n 20; exit 1; }
     systemctl restart mosdns || { err "mosdns failed to start"; journalctl -u mosdns --no-pager -n 30; exit 1; }
+    if [[ -f "${CONF_DIR}/.xray_managed" ]]; then
+        systemctl restart xray || { err "xray failed to start"; journalctl -u xray --no-pager -n 30; exit 1; }
+    fi
     if [[ "$EGRESS_MODE" == "socks5" ]]; then
         systemctl stop sniproxy 2>/dev/null || true
         systemctl restart 5gpn-tcp-proxy || { err "5gpn-tcp-proxy failed to start"; journalctl -u 5gpn-tcp-proxy --no-pager -n 20; exit 1; }
@@ -1567,7 +1743,7 @@ show_status() {
     echo "=========================================="
     echo "      Proxy Gateway Status"
     echo "=========================================="
-    for svc in mosdns sniproxy 5gpn-tcp-proxy quic-proxy china-dns-race-proxy; do
+    for svc in mosdns sniproxy 5gpn-tcp-proxy quic-proxy china-dns-race-proxy xray; do
         status=$(systemctl is-active "$svc" 2>/dev/null || echo "unknown")
         if [[ "$status" == "active" ]]; then
             echo -e "$svc: ${GREEN}running${NC}"
@@ -1588,6 +1764,7 @@ show_status() {
 
 do_uninstall() {
     warn "This will remove sniproxy, 5gpn-tcp-proxy, quic-proxy, china-dns-race-proxy, mosdns configs, and rules."
+    warn "Xray binaries installed by the official installer are kept; remove Xray manually if you no longer need it."
     read -r -p "Are you sure? [y/N]: " confirm
     [[ "$confirm" =~ ^[Yy]$ ]] || { info "Uninstall cancelled"; exit 0; }
 
@@ -1685,8 +1862,10 @@ main_install() {
 
     phase "Configure proxy egress policy"
     configure_egress_policy
+    configure_xray_policy
 
     phase "Build and install proxy services"
+    install_xray_if_requested
     install_sniproxy
     install_5gpn_tcp_proxy
     install_quic_proxy
