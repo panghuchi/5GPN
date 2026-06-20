@@ -461,7 +461,9 @@ with open(output, "w", encoding="utf-8") as fh:
     json.dump(config, fh, ensure_ascii=False, indent=2)
     fh.write("\n")
 PYEOF
-    chmod 600 /usr/local/etc/xray/config.json
+    # The official Xray service may run as a non-root user, so the config must
+    # be readable by that service account while remaining writable only by root.
+    chmod 644 /usr/local/etc/xray/config.json
 }
 
 xray_installed() {
