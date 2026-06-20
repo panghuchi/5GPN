@@ -20,8 +20,6 @@ log:
 api:
   http: "127.0.0.1:8080"
 
-include: []
-
 plugins:
   - tag: npn_clients
     type: ip_set

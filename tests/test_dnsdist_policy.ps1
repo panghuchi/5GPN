@@ -10,6 +10,9 @@ function Assert-Contains {
 }
 
 Assert-Contains 'http: "127.0.0.1:8080"' 'local-only mosdns API'
+if ($template.Contains('include: []')) {
+    throw "mosdns template must not use include: [] because mosdns v5 expects include to be a map"
+}
 Assert-Contains 'type: ip_set' 'private source network set'
 Assert-Contains '172.22.0.0/16' 'NPN client CIDR'
 Assert-Contains 'tag: plain_dns_entry' 'separate plain DNS entry'
