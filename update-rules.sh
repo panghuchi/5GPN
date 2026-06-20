@@ -13,28 +13,70 @@ GFWLIST_FALLBACK_URL="${GFWLIST_FALLBACK_URL:-https://cdn.jsdelivr.net/gh/gfwlis
 CHINALIST_FALLBACK_URL="${CHINALIST_FALLBACK_URL:-https://cdn.jsdelivr.net/gh/felixonmars/dnsmasq-china-list@master/accelerated-domains.china.conf}"
 DOWNLOAD_CONNECT_TIMEOUT="${DOWNLOAD_CONNECT_TIMEOUT:-8}"
 DOWNLOAD_MAX_TIME="${DOWNLOAD_MAX_TIME:-30}"
+RULE_DOWNLOAD_TOOL="${RULE_DOWNLOAD_TOOL:-auto}"
 DEFAULT_OVERSEAS_DNS=("1.1.1.1" "8.8.8.8" "9.9.9.9")
 DEFAULT_PUBLIC_OVERSEAS_DNS=("1.1.1.1" "8.8.8.8")
 
 log() { echo "[$(date '+%F %T')] $*"; }
 warn() { echo "[!] $*" >&2; }
 
+download_with_tool() {
+    local tool="$1"
+    local url="$2"
+    local output="$3"
+
+    case "$tool" in
+        wget)
+            command -v wget >/dev/null 2>&1 || return 127
+            wget -q \
+                --timeout="$DOWNLOAD_CONNECT_TIMEOUT" \
+                --read-timeout="$DOWNLOAD_MAX_TIME" \
+                --tries=2 \
+                -O "$output" \
+                "$url"
+            ;;
+        curl)
+            command -v curl >/dev/null 2>&1 || return 127
+            curl -fsSL \
+                --connect-timeout "$DOWNLOAD_CONNECT_TIMEOUT" \
+                --max-time "$DOWNLOAD_MAX_TIME" \
+                --retry 1 \
+                --retry-delay 1 \
+                "$url" -o "$output"
+            ;;
+        *)
+            return 127
+            ;;
+    esac
+}
+
 download_rules_file() {
     local output="$1"
     shift
 
-    local url
+    local tools=()
+    case "$RULE_DOWNLOAD_TOOL" in
+        wget) tools=(wget) ;;
+        curl) tools=(curl) ;;
+        auto) tools=(wget curl) ;;
+        *)
+            warn "Unknown RULE_DOWNLOAD_TOOL=${RULE_DOWNLOAD_TOOL}; using auto"
+            tools=(wget curl)
+            ;;
+    esac
+
+    local url tool
     for url in "$@"; do
         [[ -z "$url" ]] && continue
         log "Trying rule source: $url"
-        if curl -fsSL \
-            --connect-timeout "$DOWNLOAD_CONNECT_TIMEOUT" \
-            --max-time "$DOWNLOAD_MAX_TIME" \
-            --retry 1 \
-            --retry-delay 1 \
-            "$url" -o "$output"; then
-            return 0
-        fi
+        for tool in "${tools[@]}"; do
+            log "Downloading with ${tool}..."
+            if download_with_tool "$tool" "$url" "$output"; then
+                log "Downloaded rule source with ${tool}"
+                return 0
+            fi
+            warn "${tool} failed or timed out for: $url"
+        done
         warn "Rule source unavailable or too slow: $url"
     done
 

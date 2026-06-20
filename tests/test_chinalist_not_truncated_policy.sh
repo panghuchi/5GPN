@@ -11,6 +11,8 @@ chinalist_block="$(sed -n '/build_chinalist()/,/^}/p' "${root}/update-rules.sh")
 [[ "${rules}" == *'chinalist.txt'* ]] || { echo "mosdns should load generated chinalist.txt." >&2; exit 1; }
 [[ "${rules}" == *'CHINALIST_FALLBACK_URL'* ]] || { echo "ChinaList download must have a fallback source." >&2; exit 1; }
 [[ "${rules}" == *'--max-time "$DOWNLOAD_MAX_TIME"'* ]] || { echo "Rule downloads must have a hard max-time timeout." >&2; exit 1; }
+[[ "${rules}" == *'RULE_DOWNLOAD_TOOL="${RULE_DOWNLOAD_TOOL:-auto}"'* ]] || { echo "Rule downloader must support selecting wget/curl." >&2; exit 1; }
+[[ "${rules}" == *'tools=(wget curl)'* ]] || { echo "Rule downloader auto mode must try wget before curl." >&2; exit 1; }
 [[ "${rules}" == *'download_rules_file "$raw" "$CHINALIST_URL" "$CHINALIST_FALLBACK_URL"'* ]] || { echo "ChinaList must use the central timeout/fallback downloader." >&2; exit 1; }
 
 echo "ChinaList is not truncated"
