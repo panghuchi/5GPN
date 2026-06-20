@@ -1,9 +1,7 @@
 # 5GPN mosdns configuration template.
 #
-# Runtime placeholders are rendered by install.sh / update-rules.sh:
-#   __SERVER_IP__
-#   __PRIVATE_OVERSEAS_UPSTREAMS__
-#   __PUBLIC_OVERSEAS_UPSTREAMS__
+# Runtime values are rendered by install.sh / update-rules.sh.
+# Keep placeholder tokens out of comments; renderers replace tokens globally.
 #
 # Rule files live in /etc/mosdns/rules:
 #   proxy-domains.txt  -> force VPS-IP spoof for NPN clients

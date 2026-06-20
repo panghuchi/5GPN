@@ -12,6 +12,12 @@ function Assert-Contains {
 }
 
 Assert-Contains 'http: "127.0.0.1:8080"' 'local-only mosdns API'
+$templateHeader = ($template -split "`n" | Select-Object -First 15) -join "`n"
+if ($templateHeader.Contains('__SERVER_IP__') -or
+    $templateHeader.Contains('__PRIVATE_OVERSEAS_UPSTREAMS__') -or
+    $templateHeader.Contains('__PUBLIC_OVERSEAS_UPSTREAMS__')) {
+    throw "mosdns template header must not contain render placeholders because replacements are global"
+}
 if ($template.Contains('include: []')) {
     throw "mosdns template must not use include: [] because mosdns v5 expects include to be a map"
 }
