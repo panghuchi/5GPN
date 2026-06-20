@@ -29,6 +29,7 @@ if (-not $rules.Contains("content = content.replace('\ninclude: []\n', '\n')")) 
 }
 Assert-Contains 'type: ip_set' 'private source network set'
 Assert-Contains '172.22.0.0/16' 'NPN client CIDR'
+Assert-Contains '127.0.0.1/32' 'local diagnostic CIDR'
 Assert-Contains 'tag: plain_dns_entry' 'separate plain DNS entry'
 Assert-Contains '"!client_ip $npn_clients"' 'non-NPN DNS/53 rejection'
 Assert-Contains 'tag: dot_entry' 'separate DoT entry'
