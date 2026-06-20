@@ -460,23 +460,35 @@ PYEOF
     chmod 600 /usr/local/etc/xray/config.json
 }
 
+xray_installed() {
+    command -v xray >/dev/null 2>&1 && return 0
+    [[ -x /usr/local/bin/xray ]] && return 0
+    systemctl list-unit-files xray.service >/dev/null 2>&1 && return 0
+    [[ -f /etc/systemd/system/xray.service || -f /lib/systemd/system/xray.service ]] && return 0
+    return 1
+}
+
 install_xray_if_requested() {
     [[ "$XRAY_INSTALL" == "yes" ]] || return 0
 
-    info "Installing Xray official release..."
-    local installer
-    installer="$(mktemp /tmp/xray-install.XXXXXX.sh)"
-    curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh -o "$installer"
-    chmod +x "$installer"
-    run_quiet "Running Xray official installer..." bash "$installer" install
-    rm -f "$installer"
+    if xray_installed; then
+        info "Existing Xray installation detected; skipping official installer."
+    else
+        info "Installing Xray official release..."
+        local installer
+        installer="$(mktemp /tmp/xray-install.XXXXXX.sh)"
+        curl -L https://github.com/XTLS/Xray-install/raw/main/install-release.sh -o "$installer"
+        chmod +x "$installer"
+        run_quiet "Running Xray official installer..." bash "$installer" install
+        rm -f "$installer"
+    fi
 
     render_xray_config
     mkdir -p "$CONF_DIR"
     touch "${CONF_DIR}/.xray_managed"
     systemctl enable xray
     systemctl restart xray || { err "xray failed to start"; journalctl -u xray --no-pager -n 30; exit 1; }
-    ok "Xray installed and configured: ${EGRESS_SOCKS5_ADDR} -> ${SS2022_ADDRESS}:${SS2022_PORT}"
+    ok "Xray ready and configured: ${EGRESS_SOCKS5_ADDR} -> ${SS2022_ADDRESS}:${SS2022_PORT}"
 }
 
 
