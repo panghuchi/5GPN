@@ -1,0 +1,180 @@
+# 5GPN mosdns configuration template.
+#
+# Runtime placeholders are rendered by install.sh / update-rules.sh:
+#   __SERVER_IP__
+#   __PRIVATE_OVERSEAS_UPSTREAMS__
+#   __PUBLIC_OVERSEAS_UPSTREAMS__
+#
+# Rule files live in /etc/mosdns/rules:
+#   proxy-domains.txt  -> force VPS-IP spoof for NPN clients
+#   direct-domains.txt -> force overseas recursive resolution
+#   china-domains.txt  -> force China DNS race proxy
+#   reject-domains.txt -> reject/drop unwanted domains
+#   gfwlist.txt        -> generated from GFWList
+#   chinalist.txt      -> generated from accelerated-domains.china.conf
+
+log:
+  level: info
+  production: false
+
+api:
+  http: "127.0.0.1:8080"
+
+include: []
+
+plugins:
+  - tag: npn_clients
+    type: ip_set
+    args:
+      ips:
+        - "172.22.0.0/16"
+
+  - tag: proxy_domains
+    type: domain_set
+    args:
+      files:
+        - "/etc/mosdns/rules/proxy-domains.txt"
+        - "/etc/mosdns/rules/gfwlist.txt"
+
+  - tag: direct_domains
+    type: domain_set
+    args:
+      files:
+        - "/etc/mosdns/rules/direct-domains.txt"
+
+  - tag: china_domains
+    type: domain_set
+    args:
+      files:
+        - "/etc/mosdns/rules/china-domains.txt"
+        - "/etc/mosdns/rules/chinalist.txt"
+
+  - tag: reject_domains
+    type: domain_set
+    args:
+      files:
+        - "/etc/mosdns/rules/reject-domains.txt"
+
+  - tag: hosts
+    type: hosts
+    args:
+      files:
+        - "/etc/mosdns/rules/hosts.txt"
+
+  - tag: china_race
+    type: forward
+    args:
+      upstreams:
+        - addr: "udp://127.0.0.1:5301"
+
+  - tag: private_overseas
+    type: forward
+    args:
+      upstreams:
+__PRIVATE_OVERSEAS_UPSTREAMS__
+
+  - tag: public_overseas
+    type: forward
+    args:
+      upstreams:
+__PUBLIC_OVERSEAS_UPSTREAMS__
+
+  - tag: has_resp_sequence
+    type: sequence
+    args:
+      - matches: has_resp
+        exec: accept
+
+  - tag: common_reject_sequence
+    type: sequence
+    args:
+      # IPv4-only gateway: return NODATA for all AAAA queries.
+      - matches: qtype 28
+        exec: reject 0
+      # Reject HTTPS/SVCB to reduce client attempts to force alternative paths.
+      - matches: qtype 65
+        exec: reject 3
+      - matches: qname $reject_domains
+        exec: reject 3
+
+  - tag: private_sequence
+    type: sequence
+    args:
+      - exec: jump common_reject_sequence
+      - exec: jump has_resp_sequence
+      - exec: $hosts
+      - exec: jump has_resp_sequence
+
+      # Custom proxy domains and GFWList are spoofed only for NPN clients.
+      # The returned VPS IP makes TCP/HTTPS hit sniproxy and UDP/443 hit quic-proxy.
+      - matches:
+          - qname $proxy_domains
+          - qtype 1
+        exec: black_hole __SERVER_IP__
+      - exec: jump has_resp_sequence
+
+      # Operator override: force overseas recursive resolution without spoofing.
+      - matches: qname $direct_domains
+        exec: $private_overseas
+      - exec: jump has_resp_sequence
+
+      # China domains use the local DNS race proxy, preserving UDP race,
+      # delayed TCP retry, and overseas fallback behavior.
+      - matches: qname $china_domains
+        exec: $china_race
+      - exec: jump has_resp_sequence
+
+      # Default for private clients: overseas pool selected for the private NPN path.
+      - exec: $private_overseas
+      - exec: jump has_resp_sequence
+
+  - tag: public_sequence
+    type: sequence
+    args:
+      - exec: jump common_reject_sequence
+      - exec: jump has_resp_sequence
+      - exec: $hosts
+      - exec: jump has_resp_sequence
+
+      # Public DoT clients never receive proxy-spoof answers.
+      - matches: qname $china_domains
+        exec: $china_race
+      - exec: jump has_resp_sequence
+      - exec: $public_overseas
+      - exec: jump has_resp_sequence
+
+  - tag: plain_dns_entry
+    type: sequence
+    args:
+      # Plain DNS/53 is only for the 5G private network.
+      - matches: "!client_ip $npn_clients"
+        exec: reject 5
+      - exec: goto private_sequence
+
+  - tag: dot_entry
+    type: sequence
+    args:
+      # DoT/853 is public, but only NPN clients get proxy-spoof answers.
+      - matches: client_ip $npn_clients
+        exec: goto private_sequence
+      - exec: goto public_sequence
+
+  - tag: udp_server
+    type: udp_server
+    args:
+      entry: plain_dns_entry
+      listen: ":53"
+
+  - tag: tcp_server
+    type: tcp_server
+    args:
+      entry: plain_dns_entry
+      listen: ":53"
+
+  - tag: dot_server
+    type: tcp_server
+    args:
+      entry: dot_entry
+      listen: ":853"
+      cert: "/etc/mosdns/certs/fullchain.pem"
+      key: "/etc/mosdns/certs/privkey.pem"
