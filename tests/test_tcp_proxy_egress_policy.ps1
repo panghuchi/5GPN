@@ -27,6 +27,8 @@ Assert-Contains $install 'split_host_port "$EGRESS_SOCKS5_ADDR" inbound_host inb
 Assert-Contains $install 'SS2022_ADDRESS is required when XRAY_INSTALL=yes' 'required SS2022 address'
 Assert-Contains $install 'SS2022_METHOD is required when XRAY_INSTALL=yes' 'required SS2022 method'
 Assert-Contains $install '"protocol": "shadowsocks"' 'Xray shadowsocks outbound'
+Assert-Contains $install '"servers": [' 'Xray shadowsocks outbound server list'
+Assert-Contains $install 'status="$(systemctl is-active "$svc" 2>/dev/null || true)"' 'status avoids duplicate inactive/unknown output'
 Assert-Contains $install 'EGRESS_MODE="${EGRESS_MODE:-direct}"' 'direct egress default'
 Assert-Contains $install 'EGRESS_SOCKS5_ADDR="${EGRESS_SOCKS5_ADDR:-127.0.0.1:1080}"' 'SOCKS5 default address'
 Assert-Contains $install 'systemctl restart 5gpn-tcp-proxy' 'socks5 mode starts TCP proxy'

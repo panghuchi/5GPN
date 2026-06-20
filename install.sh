@@ -435,10 +435,14 @@ config = {
         {
             "protocol": "shadowsocks",
             "settings": {
-                "address": ss_addr,
-                "method": ss_method,
-                "password": ss_password,
-                "port": int(ss_port),
+                "servers": [
+                    {
+                        "address": ss_addr,
+                        "method": ss_method,
+                        "password": ss_password,
+                        "port": int(ss_port),
+                    }
+                ],
             },
             "tag": "ss2022-out",
         },
@@ -1756,7 +1760,8 @@ show_status() {
     echo "      Proxy Gateway Status"
     echo "=========================================="
     for svc in mosdns sniproxy 5gpn-tcp-proxy quic-proxy china-dns-race-proxy xray; do
-        status=$(systemctl is-active "$svc" 2>/dev/null || echo "unknown")
+        status="$(systemctl is-active "$svc" 2>/dev/null || true)"
+        [[ -n "$status" ]] || status="unknown"
         if [[ "$status" == "active" ]]; then
             echo -e "$svc: ${GREEN}running${NC}"
         else
