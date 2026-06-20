@@ -137,6 +137,20 @@ render_mosdns_upstreams() {
     done
 }
 
+dns_query_log_enabled() {
+    local value="${DNS_QUERY_LOG:-0}"
+    [[ -f "${BASE_DIR}/.query_log" ]] && value="$(cat "${BASE_DIR}/.query_log" 2>/dev/null || echo "$value")"
+    value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+    [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "on" ]]
+}
+
+render_mosdns_query_log_rule() {
+    local label="$1"
+    if dns_query_log_enabled; then
+        printf '      - exec: query_summary %s\n' "$label"
+    fi
+}
+
 append_subscription_domains() {
     local category="$1"
     local output="$2"
@@ -238,22 +252,26 @@ build_chinalist() {
 
 install_config() {
     [[ -f "$CONFIG_TEMPLATE" ]] || { warn "Config template not found: $CONFIG_TEMPLATE"; exit 1; }
-    local server_ip private_dns public_dns private_upstreams public_upstreams
+    local server_ip private_dns public_dns private_upstreams public_upstreams private_query_log_rule public_query_log_rule
     server_ip=$(cat "${BASE_DIR}/.public_ip" 2>/dev/null || ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[\d.]+' || echo "127.0.0.1")
     private_dns=$(cat "${BASE_DIR}/.overseas_private_dns" 2>/dev/null || cat "${BASE_DIR}/.overseas_dns" 2>/dev/null || echo "${DEFAULT_OVERSEAS_DNS[*]}")
     public_dns=$(cat "${BASE_DIR}/.overseas_public_dns" 2>/dev/null || echo "${DEFAULT_PUBLIC_OVERSEAS_DNS[*]}")
     private_upstreams=$(render_mosdns_upstreams "$private_dns")
     public_upstreams=$(render_mosdns_upstreams "$public_dns")
+    private_query_log_rule=$(render_mosdns_query_log_rule "5gpn-private")
+    public_query_log_rule=$(render_mosdns_query_log_rule "5gpn-public")
 
-    python3 - "$CONFIG_TEMPLATE" "$server_ip" "$private_upstreams" "$public_upstreams" "$CONFIG_FILE" <<'PYEOF'
+    python3 - "$CONFIG_TEMPLATE" "$server_ip" "$private_upstreams" "$public_upstreams" "$private_query_log_rule" "$public_query_log_rule" "$CONFIG_FILE" <<'PYEOF'
 import sys
-src, server_ip, private_upstreams, public_upstreams, dst = sys.argv[1:6]
+src, server_ip, private_upstreams, public_upstreams, private_query_log_rule, public_query_log_rule, dst = sys.argv[1:8]
 with open(src, 'r', encoding='utf-8') as f:
     content = f.read()
 content = content.replace('\ninclude: []\n', '\n')
 content = content.replace('__SERVER_IP__', server_ip)
 content = content.replace('__PRIVATE_OVERSEAS_UPSTREAMS__', private_upstreams.rstrip() or '        - addr: "udp://1.1.1.1:53"')
 content = content.replace('__PUBLIC_OVERSEAS_UPSTREAMS__', public_upstreams.rstrip() or '        - addr: "udp://1.1.1.1:53"')
+content = content.replace('__PRIVATE_QUERY_LOG_RULE__', private_query_log_rule.rstrip())
+content = content.replace('__PUBLIC_QUERY_LOG_RULE__', public_query_log_rule.rstrip())
 with open(dst, 'w', encoding='utf-8') as f:
     f.write(content)
 PYEOF

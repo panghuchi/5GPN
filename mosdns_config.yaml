@@ -98,6 +98,7 @@ __PUBLIC_OVERSEAS_UPSTREAMS__
   - tag: private_sequence
     type: sequence
     args:
+__PRIVATE_QUERY_LOG_RULE__
       - exec: jump common_reject_sequence
       - exec: jump has_resp_sequence
       - exec: $hosts
@@ -129,6 +130,7 @@ __PUBLIC_OVERSEAS_UPSTREAMS__
   - tag: public_sequence
     type: sequence
     args:
+__PUBLIC_QUERY_LOG_RULE__
       - exec: jump common_reject_sequence
       - exec: jump has_resp_sequence
       - exec: $hosts

@@ -148,6 +148,23 @@ export SNIPROXY_DNS="22.22.22.22"
 ./install.sh --uninstall       # 卸载组件与配置
 ```
 
+## DNS Query Diagnostics
+
+Per-query DNS logs are disabled by default to avoid noisy journals. Enable them only while troubleshooting split routing:
+
+```bash
+echo 1 > /etc/mosdns/.query_log
+RULE_DOWNLOAD_TOOL=wget /usr/local/bin/update-mosdns-rules.sh
+journalctl -u mosdns -f
+```
+
+`5gpn-private` means the 5G private-network/local diagnostic entry. `5gpn-public` means the public DoT entry. The mosdns summary includes the query name, type, and response records. Disable it after debugging:
+
+```bash
+echo 0 > /etc/mosdns/.query_log
+RULE_DOWNLOAD_TOOL=wget /usr/local/bin/update-mosdns-rules.sh
+```
+
 ## 关键文件
 
 | 文件 | 说明 |

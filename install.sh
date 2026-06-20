@@ -164,6 +164,20 @@ render_mosdns_upstreams() {
     done
 }
 
+dns_query_log_enabled() {
+    local value="${DNS_QUERY_LOG:-0}"
+    [[ -f /etc/mosdns/.query_log ]] && value="$(cat /etc/mosdns/.query_log 2>/dev/null || echo "$value")"
+    value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+    [[ "$value" == "1" || "$value" == "true" || "$value" == "yes" || "$value" == "on" ]]
+}
+
+render_mosdns_query_log_rule() {
+    local label="$1"
+    if dns_query_log_enabled; then
+        printf '      - exec: query_summary %s\n' "$label"
+    fi
+}
+
 configure_overseas_dns() {
     # DNS is the control plane of this gateway. Keep private-client upstreams,
     # public DoT upstreams, and sniproxy resolver upstreams separate so 5G NPN
@@ -1022,20 +1036,25 @@ install_mosdns() {
     echo "$PRIVATE_OVERSEAS_DNS" > /etc/mosdns/.overseas_private_dns
     echo "$PUBLIC_OVERSEAS_DNS" > /etc/mosdns/.overseas_public_dns
     echo "$SNIPROXY_DNS" > /etc/mosdns/.sniproxy_dns
+    echo "${DNS_QUERY_LOG:-0}" > /etc/mosdns/.query_log
 
-    local private_upstreams public_upstreams
+    local private_upstreams public_upstreams private_query_log_rule public_query_log_rule
     private_upstreams=$(render_mosdns_upstreams "$PRIVATE_OVERSEAS_DNS")
     public_upstreams=$(render_mosdns_upstreams "$PUBLIC_OVERSEAS_DNS")
+    private_query_log_rule=$(render_mosdns_query_log_rule "5gpn-private")
+    public_query_log_rule=$(render_mosdns_query_log_rule "5gpn-public")
 
-    python3 - /etc/mosdns/config.yaml.template "$PUBLIC_IP" "$private_upstreams" "$public_upstreams" /etc/mosdns/config.yaml <<'PYEOF'
+    python3 - /etc/mosdns/config.yaml.template "$PUBLIC_IP" "$private_upstreams" "$public_upstreams" "$private_query_log_rule" "$public_query_log_rule" /etc/mosdns/config.yaml <<'PYEOF'
 import sys
-template_path, server_ip, private_upstreams, public_upstreams, output_path = sys.argv[1:6]
+template_path, server_ip, private_upstreams, public_upstreams, private_query_log_rule, public_query_log_rule, output_path = sys.argv[1:8]
 with open(template_path, "r", encoding="utf-8") as f:
     content = f.read()
 content = content.replace("\ninclude: []\n", "\n")
 content = content.replace("__SERVER_IP__", server_ip)
 content = content.replace("__PRIVATE_OVERSEAS_UPSTREAMS__", private_upstreams.rstrip() or '        - addr: "udp://1.1.1.1:53"')
 content = content.replace("__PUBLIC_OVERSEAS_UPSTREAMS__", public_upstreams.rstrip() or '        - addr: "udp://1.1.1.1:53"')
+content = content.replace("__PRIVATE_QUERY_LOG_RULE__", private_query_log_rule.rstrip())
+content = content.replace("__PUBLIC_QUERY_LOG_RULE__", public_query_log_rule.rstrip())
 with open(output_path, "w", encoding="utf-8") as f:
     f.write(content)
 PYEOF
