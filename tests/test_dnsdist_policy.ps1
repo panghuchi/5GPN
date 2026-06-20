@@ -28,8 +28,16 @@ if (-not $rules.Contains("content = content.replace('\ninclude: []\n', '\n')")) 
     throw "update-rules.sh must scrub stale include: [] from rendered mosdns config"
 }
 Assert-Contains 'type: ip_set' 'private source network set'
-Assert-Contains '172.22.0.0/16' 'NPN client CIDR'
-Assert-Contains '127.0.0.1/32' 'local diagnostic CIDR'
+Assert-Contains '__NPN_CLIENT_CIDRS__' 'rendered NPN client CIDR list'
+if (-not $install.Contains('DEFAULT_NPN_CLIENT_CIDRS=("172.22.0.0/16")')) {
+    throw "install.sh must keep 172.22.0.0/16 as the default NPN client CIDR"
+}
+if (-not $install.Contains('127.0.0.1/32')) {
+    throw "install.sh must keep loopback in rendered NPN client CIDRs for local diagnostics"
+}
+if (-not $rules.Contains('.npn_client_cidrs')) {
+    throw "update-rules.sh must preserve saved NPN client CIDRs"
+}
 Assert-Contains 'tag: plain_dns_entry' 'separate plain DNS entry'
 Assert-Contains '"!client_ip $npn_clients"' 'non-NPN DNS/53 rejection'
 Assert-Contains 'tag: dot_entry' 'separate DoT entry'

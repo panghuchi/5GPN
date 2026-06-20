@@ -104,9 +104,11 @@ export SKIP_DNS_CHECK=1
 export PRIVATE_OVERSEAS_DNS="22.22.22.22"
 export PUBLIC_OVERSEAS_DNS="1.1.1.1,8.8.8.8"
 export SNIPROXY_DNS="22.22.22.22"
+export NPN_CLIENT_CIDRS="172.22.0.0/16"
 ./install.sh
 ```
 
+- `NPN_CLIENT_CIDRS`：会被 mosdns 识别为专网客户端的 DNS 来源 CIDR，默认 `172.22.0.0/16`；如果 DoT 查询实际来自其它专网/NAT 段，可以追加，例如 `172.22.0.0/16,100.64.0.0/10`。
 - `PRIVATE_OVERSEAS_DNS`：`172.22.0.0/16` 专网客户端默认海外解析。
 - `PUBLIC_OVERSEAS_DNS`：非专网 DoT 客户端默认海外解析。
 - `SNIPROXY_DNS`：sniproxy 后端解析 resolver，默认跟随 `PRIVATE_OVERSEAS_DNS`。
@@ -162,6 +164,14 @@ journalctl -u mosdns -f
 ```
 
 `5gpn-private` means the 5G private-network/local diagnostic entry. `5gpn-public` means the public DoT entry. The mosdns summary includes the query name, type, and response records. Disable it after debugging:
+
+如果国外域名故障时日志显示 `5gpn-public`，说明该 DNS 查询没有命中 `NPN_CLIENT_CIDRS`，mosdns 会返回真实公网解析而不是 VPS IP，VPS 443 就不会收到连接。此时先抓 DNS 来源地址，再把对应 CIDR 写入：
+
+```bash
+tcpdump -ni any 'port 53 or port 853'
+echo '172.22.0.0/16,100.64.0.0/10' > /etc/mosdns/.npn_client_cidrs
+RULE_DOWNLOAD_TOOL=wget /usr/local/bin/update-mosdns-rules.sh
+```
 
 ```bash
 echo 0 > /etc/mosdns/.query_log

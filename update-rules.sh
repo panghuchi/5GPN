@@ -16,6 +16,7 @@ DOWNLOAD_MAX_TIME="${DOWNLOAD_MAX_TIME:-30}"
 RULE_DOWNLOAD_TOOL="${RULE_DOWNLOAD_TOOL:-auto}"
 DEFAULT_OVERSEAS_DNS=("1.1.1.1" "8.8.8.8" "9.9.9.9")
 DEFAULT_PUBLIC_OVERSEAS_DNS=("1.1.1.1" "8.8.8.8")
+DEFAULT_NPN_CLIENT_CIDRS=("172.22.0.0/16")
 SUBSCRIPTION_FILES=("proxy-urls.txt" "direct-urls.txt" "china-urls.txt" "reject-urls.txt")
 
 log() { echo "[$(date '+%F %T')] $*"; }
@@ -138,6 +139,30 @@ render_mosdns_upstreams() {
     done
 }
 
+render_mosdns_client_cidrs() {
+    local input="${1:-}"
+    local cidr_list=()
+    local cidr has_loopback=0
+    if [[ -z "$input" ]]; then
+        cidr_list=("${DEFAULT_NPN_CLIENT_CIDRS[@]}")
+    else
+        input="${input//,/ }"
+        read -r -a cidr_list <<< "$input"
+    fi
+    for cidr in "${cidr_list[@]}"; do
+        [[ -z "$cidr" ]] && continue
+        if [[ ! "$cidr" =~ ^[0-9A-Fa-f:.]+/[0-9]{1,3}$ ]]; then
+            warn "Skipping invalid NPN client CIDR: $cidr"
+            continue
+        fi
+        [[ "$cidr" == "127.0.0.1/32" ]] && has_loopback=1
+        printf '        - "%s"\n' "$cidr"
+    done
+    if [[ "$has_loopback" == "0" ]]; then
+        printf '        - "127.0.0.1/32"\n'
+    fi
+}
+
 dns_query_log_enabled() {
     local value="${DNS_QUERY_LOG:-0}"
     [[ -f "${BASE_DIR}/.query_log" ]] && value="$(cat "${BASE_DIR}/.query_log" 2>/dev/null || echo "$value")"
@@ -253,22 +278,25 @@ build_chinalist() {
 
 install_config() {
     [[ -f "$CONFIG_TEMPLATE" ]] || { warn "Config template not found: $CONFIG_TEMPLATE"; exit 1; }
-    local server_ip private_dns public_dns private_upstreams public_upstreams private_query_log_rule public_query_log_rule
+    local server_ip npn_client_cidrs_raw npn_client_cidrs private_dns public_dns private_upstreams public_upstreams private_query_log_rule public_query_log_rule
     server_ip=$(cat "${BASE_DIR}/.public_ip" 2>/dev/null || ip route get 1.1.1.1 2>/dev/null | grep -oP 'src \K[\d.]+' || echo "127.0.0.1")
+    npn_client_cidrs_raw=$(cat "${BASE_DIR}/.npn_client_cidrs" 2>/dev/null || echo "${DEFAULT_NPN_CLIENT_CIDRS[*]}")
     private_dns=$(cat "${BASE_DIR}/.overseas_private_dns" 2>/dev/null || cat "${BASE_DIR}/.overseas_dns" 2>/dev/null || echo "${DEFAULT_OVERSEAS_DNS[*]}")
     public_dns=$(cat "${BASE_DIR}/.overseas_public_dns" 2>/dev/null || echo "${DEFAULT_PUBLIC_OVERSEAS_DNS[*]}")
+    npn_client_cidrs=$(render_mosdns_client_cidrs "$npn_client_cidrs_raw")
     private_upstreams=$(render_mosdns_upstreams "$private_dns")
     public_upstreams=$(render_mosdns_upstreams "$public_dns")
     private_query_log_rule=$(render_mosdns_query_log_rule "5gpn-private")
     public_query_log_rule=$(render_mosdns_query_log_rule "5gpn-public")
 
-    python3 - "$CONFIG_TEMPLATE" "$server_ip" "$private_upstreams" "$public_upstreams" "$private_query_log_rule" "$public_query_log_rule" "$CONFIG_FILE" <<'PYEOF'
+    python3 - "$CONFIG_TEMPLATE" "$server_ip" "$npn_client_cidrs" "$private_upstreams" "$public_upstreams" "$private_query_log_rule" "$public_query_log_rule" "$CONFIG_FILE" <<'PYEOF'
 import sys
-src, server_ip, private_upstreams, public_upstreams, private_query_log_rule, public_query_log_rule, dst = sys.argv[1:8]
+src, server_ip, npn_client_cidrs, private_upstreams, public_upstreams, private_query_log_rule, public_query_log_rule, dst = sys.argv[1:9]
 with open(src, 'r', encoding='utf-8') as f:
     content = f.read()
 content = content.replace('\ninclude: []\n', '\n')
 content = content.replace('__SERVER_IP__', server_ip)
+content = content.replace('__NPN_CLIENT_CIDRS__', npn_client_cidrs.rstrip() or '        - "172.22.0.0/16"\n        - "127.0.0.1/32"')
 content = content.replace('__PRIVATE_OVERSEAS_UPSTREAMS__', private_upstreams.rstrip() or '        - addr: "udp://1.1.1.1:53"')
 content = content.replace('__PUBLIC_OVERSEAS_UPSTREAMS__', public_upstreams.rstrip() or '        - addr: "udp://1.1.1.1:53"')
 content = content.replace('__PRIVATE_QUERY_LOG_RULE__', private_query_log_rule.rstrip())

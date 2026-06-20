@@ -24,8 +24,7 @@ plugins:
     args:
       ips:
         # Loopback is included for local diagnostics with dig @127.0.0.1.
-        - "172.22.0.0/16"
-        - "127.0.0.1/32"
+__NPN_CLIENT_CIDRS__
 
   - tag: proxy_domains
     type: domain_set

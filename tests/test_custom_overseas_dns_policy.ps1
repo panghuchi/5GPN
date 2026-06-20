@@ -16,10 +16,16 @@ Assert-Contains $install 'configure_overseas_dns()' 'installer overseas DNS func
 Assert-Contains $install 'PRIVATE_OVERSEAS_DNS' 'installer private overseas DNS variable'
 Assert-Contains $install 'PUBLIC_OVERSEAS_DNS' 'installer public overseas DNS variable'
 Assert-Contains $install 'SNIPROXY_DNS' 'installer sniproxy DNS variable'
+Assert-Contains $install 'NPN_CLIENT_CIDRS' 'installer NPN client CIDR variable'
+Assert-Contains $install 'configure_npn_client_cidrs()' 'installer NPN client CIDR prompt'
 Assert-Contains $install '/etc/mosdns/.overseas_private_dns' 'installer saves private overseas DNS config'
 Assert-Contains $install '/etc/mosdns/.overseas_public_dns' 'installer saves public overseas DNS config'
+Assert-Contains $install '/etc/mosdns/.npn_client_cidrs' 'installer saves NPN client CIDR config'
+Assert-Contains $template '__NPN_CLIENT_CIDRS__' 'mosdns NPN client CIDR placeholder'
 Assert-Contains $template '__PRIVATE_OVERSEAS_UPSTREAMS__' 'mosdns private overseas placeholder'
 Assert-Contains $template '__PUBLIC_OVERSEAS_UPSTREAMS__' 'mosdns public overseas placeholder'
+Assert-Contains $rules '.npn_client_cidrs' 'rule updater reads saved NPN client CIDR config'
+Assert-Contains $rules '__NPN_CLIENT_CIDRS__' 'rule updater replaces NPN client CIDR placeholder'
 Assert-Contains $rules '.overseas_private_dns' 'rule updater reads saved private overseas DNS config'
 Assert-Contains $rules '.overseas_public_dns' 'rule updater reads saved public overseas DNS config'
 Assert-Contains $rules '__PRIVATE_OVERSEAS_UPSTREAMS__' 'rule updater replaces private overseas placeholder'
@@ -27,5 +33,6 @@ Assert-Contains $rules '__PUBLIC_OVERSEAS_UPSTREAMS__' 'rule updater replaces pu
 Assert-Contains $readme 'PRIVATE_OVERSEAS_DNS' 'README documents private overseas DNS variable'
 Assert-Contains $readme 'PUBLIC_OVERSEAS_DNS' 'README documents public overseas DNS variable'
 Assert-Contains $readme 'SNIPROXY_DNS' 'README documents sniproxy DNS variable'
+Assert-Contains $readme 'NPN_CLIENT_CIDRS' 'README documents NPN client CIDR variable'
 
 Write-Output "custom overseas DNS markers OK"

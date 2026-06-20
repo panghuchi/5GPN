@@ -20,8 +20,10 @@ GFWLIST_URL="https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.tx
 CHINALIST_URL="https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/accelerated-domains.china.conf"
 DEFAULT_OVERSEAS_DNS=("1.1.1.1" "8.8.8.8" "9.9.9.9")
 DEFAULT_PUBLIC_OVERSEAS_DNS=("1.1.1.1" "8.8.8.8")
+DEFAULT_NPN_CLIENT_CIDRS=("172.22.0.0/16")
 MOSDNS_VERSION="${MOSDNS_VERSION:-latest}"
 SSH_PORT="${SSH_PORT:-26941}"
+NPN_CLIENT_CIDRS="${NPN_CLIENT_CIDRS:-}"
 EGRESS_MODE="${EGRESS_MODE:-direct}"
 EGRESS_SOCKS5_ADDR="${EGRESS_SOCKS5_ADDR:-127.0.0.1:1080}"
 EGRESS_SOCKS5_USERNAME="${EGRESS_SOCKS5_USERNAME:-}"
@@ -174,6 +176,33 @@ render_mosdns_upstreams() {
     done
 }
 
+render_mosdns_client_cidrs() {
+    local input="${1:-}"
+    local cidr_list=()
+    local cidr has_loopback=0
+
+    if [[ -z "$input" ]]; then
+        cidr_list=("${DEFAULT_NPN_CLIENT_CIDRS[@]}")
+    else
+        input="${input//,/ }"
+        read -r -a cidr_list <<< "$input"
+    fi
+
+    for cidr in "${cidr_list[@]}"; do
+        [[ -z "$cidr" ]] && continue
+        if [[ ! "$cidr" =~ ^[0-9A-Fa-f:.]+/[0-9]{1,3}$ ]]; then
+            warn "Skipping invalid NPN client CIDR: $cidr"
+            continue
+        fi
+        [[ "$cidr" == "127.0.0.1/32" ]] && has_loopback=1
+        printf '        - "%s"\n' "$cidr"
+    done
+
+    if [[ "$has_loopback" == "0" ]]; then
+        printf '        - "127.0.0.1/32"\n'
+    fi
+}
+
 dns_query_log_enabled() {
     local value="${DNS_QUERY_LOG:-0}"
     [[ -f /etc/mosdns/.query_log ]] && value="$(cat /etc/mosdns/.query_log 2>/dev/null || echo "$value")"
@@ -232,6 +261,24 @@ configure_overseas_dns() {
     info "Public overseas DNS upstreams: $PUBLIC_OVERSEAS_DNS"
     info "sniproxy resolver upstreams: $SNIPROXY_DNS"
     note "Resolver policy saved under ${CONF_DIR}; rule updates will reuse these values."
+}
+
+configure_npn_client_cidrs() {
+    local selected="${NPN_CLIENT_CIDRS:-}"
+
+    if [[ -z "$selected" && -t 0 ]]; then
+        echo ""
+        read -r -p "NPN/private DNS client CIDRs [172.22.0.0/16]: " selected
+    fi
+    if [[ -z "$selected" ]]; then
+        selected="${DEFAULT_NPN_CLIENT_CIDRS[*]}"
+    fi
+
+    NPN_CLIENT_CIDRS="$selected"
+    mkdir -p "$CONF_DIR"
+    echo "$NPN_CLIENT_CIDRS" > "${CONF_DIR}/.npn_client_cidrs"
+    info "NPN/private DNS client CIDRs: $NPN_CLIENT_CIDRS"
+    note "If DNS queries arrive from another carrier/NAT CIDR, add it here so mosdns returns the VPS IP."
 }
 
 normalize_egress_mode() {
@@ -576,6 +623,7 @@ Environment variables (for non-interactive use):
   DOMAIN         Your own domain name that resolves to this VPS
   SKIP_DNS_CHECK Skip public A-record verification when set to 1
   OVERSEAS_DNS   Backward-compatible alias for PRIVATE_OVERSEAS_DNS
+  NPN_CLIENT_CIDRS  CIDRs treated as private/NPN DNS clients, default 172.22.0.0/16
   PRIVATE_OVERSEAS_DNS  Overseas upstream DNS for 172.22.0.0/16 DoT clients
   PUBLIC_OVERSEAS_DNS   Overseas upstream DNS for non-private DoT clients
   SNIPROXY_DNS   Resolver upstream DNS for TCP sniproxy backends
@@ -1369,21 +1417,24 @@ install_mosdns() {
     echo "$PRIVATE_OVERSEAS_DNS" > /etc/mosdns/.overseas_private_dns
     echo "$PUBLIC_OVERSEAS_DNS" > /etc/mosdns/.overseas_public_dns
     echo "$SNIPROXY_DNS" > /etc/mosdns/.sniproxy_dns
+    echo "$NPN_CLIENT_CIDRS" > /etc/mosdns/.npn_client_cidrs
     echo "${DNS_QUERY_LOG:-0}" > /etc/mosdns/.query_log
 
-    local private_upstreams public_upstreams private_query_log_rule public_query_log_rule
+    local npn_client_cidrs private_upstreams public_upstreams private_query_log_rule public_query_log_rule
+    npn_client_cidrs=$(render_mosdns_client_cidrs "$NPN_CLIENT_CIDRS")
     private_upstreams=$(render_mosdns_upstreams "$PRIVATE_OVERSEAS_DNS")
     public_upstreams=$(render_mosdns_upstreams "$PUBLIC_OVERSEAS_DNS")
     private_query_log_rule=$(render_mosdns_query_log_rule "5gpn-private")
     public_query_log_rule=$(render_mosdns_query_log_rule "5gpn-public")
 
-    python3 - /etc/mosdns/config.yaml.template "$PUBLIC_IP" "$private_upstreams" "$public_upstreams" "$private_query_log_rule" "$public_query_log_rule" /etc/mosdns/config.yaml <<'PYEOF'
+    python3 - /etc/mosdns/config.yaml.template "$PUBLIC_IP" "$npn_client_cidrs" "$private_upstreams" "$public_upstreams" "$private_query_log_rule" "$public_query_log_rule" /etc/mosdns/config.yaml <<'PYEOF'
 import sys
-template_path, server_ip, private_upstreams, public_upstreams, private_query_log_rule, public_query_log_rule, output_path = sys.argv[1:8]
+template_path, server_ip, npn_client_cidrs, private_upstreams, public_upstreams, private_query_log_rule, public_query_log_rule, output_path = sys.argv[1:9]
 with open(template_path, "r", encoding="utf-8") as f:
     content = f.read()
 content = content.replace("\ninclude: []\n", "\n")
 content = content.replace("__SERVER_IP__", server_ip)
+content = content.replace("__NPN_CLIENT_CIDRS__", npn_client_cidrs.rstrip() or '        - "172.22.0.0/16"\n        - "127.0.0.1/32"')
 content = content.replace("__PRIVATE_OVERSEAS_UPSTREAMS__", private_upstreams.rstrip() or '        - addr: "udp://1.1.1.1:53"')
 content = content.replace("__PUBLIC_OVERSEAS_UPSTREAMS__", public_upstreams.rstrip() or '        - addr: "udp://1.1.1.1:53"')
 content = content.replace("__PRIVATE_QUERY_LOG_RULE__", private_query_log_rule.rstrip())
@@ -1872,6 +1923,7 @@ main_install() {
 
     phase "Configure resolver policy"
     configure_overseas_dns
+    configure_npn_client_cidrs
 
     phase "Configure proxy egress policy"
     configure_egress_policy
