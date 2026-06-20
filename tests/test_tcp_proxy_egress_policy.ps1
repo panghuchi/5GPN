@@ -40,6 +40,9 @@ Assert-Contains $install 'quic-proxy -l 0.0.0.0:443 -egress=${EGRESS_MODE}' 'qui
 if ($install.Contains('quic-proxy already compiled')) {
     throw "install.sh must rebuild quic-proxy when service flags change"
 }
+if ($install.Contains('"protocol": "freedom"') -or $install.Contains('"domainStrategy": "UseIPv4v6"')) {
+    throw "Xray config must only render the SS2022 outbound"
+}
 Assert-Contains $proxy 'dialSOCKS5' 'SOCKS5 outbound implementation'
 Assert-Contains $proxy 'parseTLSSNI' 'TLS SNI parser'
 Assert-Contains $proxy 'parseHTTPHost' 'HTTP Host parser'

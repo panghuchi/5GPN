@@ -427,12 +427,6 @@ config = {
     },
     "outbounds": [
         {
-            "protocol": "freedom",
-            "settings": {
-                "domainStrategy": "UseIPv4v6",
-            },
-        },
-        {
             "protocol": "shadowsocks",
             "settings": {
                 "servers": [
