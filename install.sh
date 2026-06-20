@@ -1004,7 +1004,12 @@ After=network.target
 
 [Service]
 Type=simple
-ExecStart=/opt/proxy-gateway/bin/quic-proxy -l 0.0.0.0:443
+Environment="EGRESS_MODE=direct"
+Environment="EGRESS_SOCKS5_ADDR=127.0.0.1:1080"
+Environment="EGRESS_SOCKS5_USERNAME="
+Environment="EGRESS_SOCKS5_PASSWORD="
+EnvironmentFile=-/opt/proxy-gateway/etc/egress.env
+ExecStart=/opt/proxy-gateway/bin/quic-proxy -l 0.0.0.0:443 -egress=${EGRESS_MODE} -socks5=${EGRESS_SOCKS5_ADDR} -socks5-user=${EGRESS_SOCKS5_USERNAME} -socks5-pass=${EGRESS_SOCKS5_PASSWORD}
 ExecReload=/bin/kill -HUP $MAINPID
 Restart=on-failure
 RestartSec=5

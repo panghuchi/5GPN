@@ -14,10 +14,15 @@ import (
 	"crypto/hmac"
 	"crypto/sha256"
 	"encoding/binary"
+	"errors"
 	"flag"
+	"fmt"
+	"io"
 	"log"
 	"net"
 	"os"
+	"strconv"
+	"strings"
 	"sync"
 	"time"
 )
@@ -34,11 +39,19 @@ var (
 	listenAddr  = flag.String("l", ":443", "Listen address (UDP)")
 	idleTimeout = flag.Duration("idle-timeout", 300*time.Second, "UDP session idle timeout")
 	debug       = flag.Bool("debug", false, "Enable debug logging")
+	egressMode  = flag.String("egress", "direct", "Egress mode: direct or socks5")
+	socks5Addr  = flag.String("socks5", "127.0.0.1:1080", "SOCKS5 server address for UDP ASSOCIATE")
+	socks5User  = flag.String("socks5-user", "", "SOCKS5 username")
+	socks5Pass  = flag.String("socks5-pass", "", "SOCKS5 password")
 )
 
 type Session struct {
 	clientAddr   *net.UDPAddr
 	backendConn  *net.UDPConn
+	socksControl net.Conn
+	targetHost   string
+	targetPort   int
+	egress       string
 	lastActivity time.Time
 	mu           sync.Mutex
 }
@@ -54,6 +67,10 @@ func main() {
 	if *debug {
 		log.SetFlags(log.LstdFlags | log.Lshortfile)
 	}
+	mode := strings.ToLower(strings.TrimSpace(*egressMode))
+	if mode != "direct" && mode != "socks5" {
+		log.Fatalf("unsupported egress mode: %s", *egressMode)
+	}
 
 	addr, err := net.ResolveUDPAddr("udp", *listenAddr)
 	if err != nil {
@@ -65,7 +82,7 @@ func main() {
 	}
 	defer conn.Close()
 
-	log.Printf("QUIC SNI Proxy listening on UDP %s", *listenAddr)
+	log.Printf("QUIC SNI Proxy listening on UDP %s (egress=%s, socks5=%s)", *listenAddr, mode, *socks5Addr)
 
 	mgr := &SessionManager{
 		sessions: make(map[string]*Session),
@@ -99,9 +116,13 @@ func (m *SessionManager) handlePacket(data []byte, clientAddr *net.UDPAddr) {
 		sess.mu.Lock()
 		sess.lastActivity = time.Now()
 		bc := sess.backendConn
+		payload := data
+		if sess.egress == "socks5" {
+			payload = wrapSOCKS5UDP(sess.targetHost, sess.targetPort, data)
+		}
 		sess.mu.Unlock()
 		if bc != nil {
-			if _, err := bc.Write(data); err != nil {
+			if _, err := bc.Write(payload); err != nil {
 				log.Printf("[%s] Write to backend error: %v", key, err)
 			}
 		}
@@ -116,35 +137,45 @@ func (m *SessionManager) handlePacket(data []byte, clientAddr *net.UDPAddr) {
 		return
 	}
 
-	// Resolve SNI
-	ips, err := net.LookupIP(sni)
-	if err != nil || len(ips) == 0 {
-		log.Printf("[%s] DNS lookup failed for '%s': %v", key, sni, err)
-		return
-	}
-	backendIP, ok := selectBackendIPv4(ips)
-	if !ok {
-		log.Printf("[%s] DNS lookup for '%s' returned no IPv4 address", key, sni)
-		return
+	var backendIP net.IP
+	if strings.ToLower(strings.TrimSpace(*egressMode)) == "direct" {
+		ips, err := net.LookupIP(sni)
+		if err != nil || len(ips) == 0 {
+			log.Printf("[%s] DNS lookup failed for '%s': %v", key, sni, err)
+			return
+		}
+		var ok bool
+		backendIP, ok = selectBackendIPv4(ips)
+		if !ok {
+			log.Printf("[%s] DNS lookup for '%s' returned no IPv4 address", key, sni)
+			return
+		}
 	}
 
-	backendAddr := &net.UDPAddr{IP: backendIP, Port: 443}
-	bc, err := net.DialUDP("udp", nil, backendAddr)
+	bc, control, err := dialUDPBackend(sni, backendIP, 443)
 	if err != nil {
-		log.Printf("[%s] DialUDP to %s error: %v", key, backendAddr, err)
+		log.Printf("[%s] Dial UDP backend for %s (%s) error: %v", key, sni, backendIP, err)
 		return
 	}
 
 	sess = &Session{
 		clientAddr:   clientAddr,
 		backendConn:  bc,
+		socksControl: control,
+		targetHost:   sni,
+		targetPort:   443,
+		egress:       strings.ToLower(strings.TrimSpace(*egressMode)),
 		lastActivity: time.Now(),
 	}
 	m.mu.Lock()
 	m.sessions[key] = sess
 	m.mu.Unlock()
 
-	if _, err := bc.Write(data); err != nil {
+	firstPayload := data
+	if sess.egress == "socks5" {
+		firstPayload = wrapSOCKS5UDP(sess.targetHost, sess.targetPort, data)
+	}
+	if _, err := bc.Write(firstPayload); err != nil {
 		log.Printf("[%s] First packet forward error: %v", key, err)
 		m.removeSession(key)
 		return
@@ -152,7 +183,20 @@ func (m *SessionManager) handlePacket(data []byte, clientAddr *net.UDPAddr) {
 
 	go m.relayBackendToClient(sess, key)
 	if *debug {
-		log.Printf("[%s] New session to %s (%s)", key, sni, backendIP)
+		log.Printf("[%s] New session to %s (%s) via %s", key, sni, backendIP, sess.egress)
+	}
+}
+
+func dialUDPBackend(host string, ip net.IP, port int) (*net.UDPConn, net.Conn, error) {
+	switch strings.ToLower(strings.TrimSpace(*egressMode)) {
+	case "direct":
+		backendAddr := &net.UDPAddr{IP: ip, Port: port}
+		conn, err := net.DialUDP("udp", nil, backendAddr)
+		return conn, nil, err
+	case "socks5":
+		return dialSOCKS5UDPAssociate(host, port)
+	default:
+		return nil, nil, errors.New("unsupported egress mode")
 	}
 }
 
@@ -163,6 +207,201 @@ func selectBackendIPv4(ips []net.IP) (net.IP, bool) {
 		}
 	}
 	return nil, false
+}
+
+func dialSOCKS5UDPAssociate(host string, port int) (*net.UDPConn, net.Conn, error) {
+	control, err := net.DialTimeout("tcp", *socks5Addr, 10*time.Second)
+	if err != nil {
+		return nil, nil, err
+	}
+	if err := control.SetDeadline(time.Now().Add(10 * time.Second)); err != nil {
+		control.Close()
+		return nil, nil, err
+	}
+
+	methods := []byte{0x00}
+	if *socks5User != "" || *socks5Pass != "" {
+		methods = append(methods, 0x02)
+	}
+	if _, err := control.Write([]byte{0x05, byte(len(methods))}); err != nil {
+		control.Close()
+		return nil, nil, err
+	}
+	if _, err := control.Write(methods); err != nil {
+		control.Close()
+		return nil, nil, err
+	}
+	reply := make([]byte, 2)
+	if _, err := io.ReadFull(control, reply); err != nil {
+		control.Close()
+		return nil, nil, err
+	}
+	if reply[0] != 0x05 || reply[1] == 0xff {
+		control.Close()
+		return nil, nil, errors.New("SOCKS5 UDP handshake rejected")
+	}
+	if reply[1] == 0x02 {
+		if err := socks5UsernamePasswordAuth(control, *socks5User, *socks5Pass); err != nil {
+			control.Close()
+			return nil, nil, err
+		}
+	} else if reply[1] != 0x00 {
+		control.Close()
+		return nil, nil, fmt.Errorf("unsupported SOCKS5 auth method: 0x%02x", reply[1])
+	}
+
+	req := []byte{0x05, 0x03, 0x00, 0x01, 0, 0, 0, 0, 0, 0}
+	if _, err := control.Write(req); err != nil {
+		control.Close()
+		return nil, nil, err
+	}
+	relayHost, relayPort, err := readSOCKS5ReplyAddress(control)
+	if err != nil {
+		control.Close()
+		return nil, nil, err
+	}
+	if relayHost == "0.0.0.0" || relayHost == "::" {
+		if host, _, err := net.SplitHostPort(*socks5Addr); err == nil {
+			relayHost = host
+		}
+	}
+	relayAddr, err := net.ResolveUDPAddr("udp", net.JoinHostPort(relayHost, strconv.Itoa(relayPort)))
+	if err != nil {
+		control.Close()
+		return nil, nil, err
+	}
+	udpConn, err := net.DialUDP("udp", nil, relayAddr)
+	if err != nil {
+		control.Close()
+		return nil, nil, err
+	}
+	_ = control.SetDeadline(time.Time{})
+	return udpConn, control, nil
+}
+
+func socks5UsernamePasswordAuth(conn net.Conn, user, pass string) error {
+	if len(user) > 255 || len(pass) > 255 {
+		return errors.New("SOCKS5 username/password too long")
+	}
+	req := []byte{0x01, byte(len(user))}
+	req = append(req, []byte(user)...)
+	req = append(req, byte(len(pass)))
+	req = append(req, []byte(pass)...)
+	if _, err := conn.Write(req); err != nil {
+		return err
+	}
+	reply := make([]byte, 2)
+	if _, err := io.ReadFull(conn, reply); err != nil {
+		return err
+	}
+	if reply[0] != 0x01 || reply[1] != 0x00 {
+		return errors.New("SOCKS5 username/password authentication failed")
+	}
+	return nil
+}
+
+func readSOCKS5ReplyAddress(conn net.Conn) (string, int, error) {
+	header := make([]byte, 4)
+	if _, err := io.ReadFull(conn, header); err != nil {
+		return "", 0, err
+	}
+	if header[0] != 0x05 {
+		return "", 0, errors.New("invalid SOCKS5 response")
+	}
+	if header[1] != 0x00 {
+		return "", 0, fmt.Errorf("SOCKS5 request failed with code 0x%02x", header[1])
+	}
+	host, err := readSOCKS5Address(conn, header[3])
+	if err != nil {
+		return "", 0, err
+	}
+	portBytes := make([]byte, 2)
+	if _, err := io.ReadFull(conn, portBytes); err != nil {
+		return "", 0, err
+	}
+	return host, int(binary.BigEndian.Uint16(portBytes)), nil
+}
+
+func readSOCKS5Address(reader io.Reader, atyp byte) (string, error) {
+	switch atyp {
+	case 0x01:
+		ip := make([]byte, 4)
+		if _, err := io.ReadFull(reader, ip); err != nil {
+			return "", err
+		}
+		return net.IP(ip).String(), nil
+	case 0x03:
+		lenByte := make([]byte, 1)
+		if _, err := io.ReadFull(reader, lenByte); err != nil {
+			return "", err
+		}
+		name := make([]byte, int(lenByte[0]))
+		if _, err := io.ReadFull(reader, name); err != nil {
+			return "", err
+		}
+		return string(name), nil
+	case 0x04:
+		ip := make([]byte, 16)
+		if _, err := io.ReadFull(reader, ip); err != nil {
+			return "", err
+		}
+		return net.IP(ip).String(), nil
+	default:
+		return "", fmt.Errorf("unsupported SOCKS5 address type: 0x%02x", atyp)
+	}
+}
+
+func wrapSOCKS5UDP(host string, port int, payload []byte) []byte {
+	out := []byte{0x00, 0x00, 0x00}
+	if ip := net.ParseIP(host); ip != nil {
+		if ip4 := ip.To4(); ip4 != nil {
+			out = append(out, 0x01)
+			out = append(out, ip4...)
+		} else {
+			out = append(out, 0x04)
+			out = append(out, ip.To16()...)
+		}
+	} else {
+		if len(host) > 255 {
+			host = host[:255]
+		}
+		out = append(out, 0x03, byte(len(host)))
+		out = append(out, []byte(host)...)
+	}
+	out = binary.BigEndian.AppendUint16(out, uint16(port))
+	out = append(out, payload...)
+	return out
+}
+
+func unwrapSOCKS5UDP(packet []byte) ([]byte, error) {
+	if len(packet) < 4 {
+		return nil, errors.New("short SOCKS5 UDP packet")
+	}
+	if packet[2] != 0x00 {
+		return nil, errors.New("fragmented SOCKS5 UDP packet is unsupported")
+	}
+	p := 3
+	switch packet[p] {
+	case 0x01:
+		p += 1 + 4
+	case 0x03:
+		if p+1 >= len(packet) {
+			return nil, errors.New("short SOCKS5 UDP domain header")
+		}
+		p += 2 + int(packet[p+1])
+	case 0x04:
+		p += 1 + 16
+	default:
+		return nil, fmt.Errorf("unsupported SOCKS5 UDP address type: 0x%02x", packet[p])
+	}
+	if p+2 > len(packet) {
+		return nil, errors.New("short SOCKS5 UDP port")
+	}
+	p += 2
+	if p > len(packet) {
+		return nil, errors.New("short SOCKS5 UDP payload")
+	}
+	return packet[p:], nil
 }
 
 func (m *SessionManager) relayBackendToClient(sess *Session, key string) {
@@ -179,7 +418,18 @@ func (m *SessionManager) relayBackendToClient(sess *Session, key string) {
 		sess.mu.Lock()
 		sess.lastActivity = time.Now()
 		sess.mu.Unlock()
-		if _, err := m.listener.WriteToUDP(buf[:n], sess.clientAddr); err != nil {
+		payload := buf[:n]
+		if sess.egress == "socks5" {
+			var err error
+			payload, err = unwrapSOCKS5UDP(payload)
+			if err != nil {
+				if *debug {
+					log.Printf("[%s] SOCKS5 UDP unwrap error: %v", key, err)
+				}
+				continue
+			}
+		}
+		if _, err := m.listener.WriteToUDP(payload, sess.clientAddr); err != nil {
 			log.Printf("[%s] WriteToUDP error: %v", key, err)
 			m.removeSession(key)
 			return
@@ -196,6 +446,9 @@ func (m *SessionManager) removeSession(key string) {
 	m.mu.Unlock()
 	if ok && sess.backendConn != nil {
 		sess.backendConn.Close()
+	}
+	if ok && sess.socksControl != nil {
+		sess.socksControl.Close()
 	}
 }
 

@@ -110,7 +110,7 @@ export SNIPROXY_DNS="22.22.22.22"
 - `PRIVATE_OVERSEAS_DNS`：`172.22.0.0/16` 专网客户端默认海外解析。
 - `PUBLIC_OVERSEAS_DNS`：非专网 DoT 客户端默认海外解析。
 - `SNIPROXY_DNS`：sniproxy 后端解析 resolver，默认跟随 `PRIVATE_OVERSEAS_DNS`。
-- `EGRESS_MODE`：TCP 出口模式，`direct` 使用 sniproxy，`socks5` 使用 5gpn-tcp-proxy。
+- `EGRESS_MODE`：proxy 出口模式，`direct` 使用 sniproxy/quic-proxy 直连，`socks5` 使用 5gpn-tcp-proxy/quic-proxy 走 SOCKS5。
 - `EGRESS_SOCKS5_ADDR`：`EGRESS_MODE=socks5` 时的本机 SOCKS5 出口，默认 `127.0.0.1:1080`。
 - `OVERSEAS_DNS`：兼容旧参数，等同于 `PRIVATE_OVERSEAS_DNS`。
 
@@ -191,7 +191,7 @@ systemctl restart 5gpn-tcp-proxy
 systemctl stop sniproxy
 ```
 
-当前版本 SOCKS5 egress 只覆盖 TCP 80/443。UDP/443 QUIC 仍由 `quic-proxy` 直接出站，后续版本再扩展 UDP 出口。
+SOCKS5 egress 会同时覆盖 TCP 80/443 和 UDP/443 QUIC。Xray/sing-box 的 SOCKS5 入站需要开启 UDP 支持，否则 QUIC 会失败或回退到 TCP。
 
 ## 关键文件
 
