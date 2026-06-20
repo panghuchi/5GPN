@@ -122,7 +122,15 @@ __PRIVATE_QUERY_LOG_RULE__
         exec: $china_race
       - exec: jump has_resp_sequence
 
-      # Default for private clients: overseas pool selected for the private NPN path.
+      # Default for private clients: any remaining A query is treated as proxy
+      # traffic. This matches the 5GPN model where non-China sites should enter
+      # the VPS TCP/QUIC proxy instead of returning a real public IP to the NPN.
+      - matches: qtype 1
+        exec: black_hole __SERVER_IP__
+      - exec: jump has_resp_sequence
+
+      # Non-A records that survived the common reject sequence can still use the
+      # overseas resolver as a conservative fallback.
       - exec: $private_overseas
       - exec: jump has_resp_sequence
 

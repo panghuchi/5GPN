@@ -43,6 +43,12 @@ Assert-Contains '"!client_ip $npn_clients"' 'non-NPN DNS/53 rejection'
 Assert-Contains 'tag: dot_entry' 'separate DoT entry'
 Assert-Contains 'client_ip $npn_clients' 'DoT source-aware split'
 Assert-Contains 'black_hole __SERVER_IP__' 'private-client proxy spoof'
+if (-not $template.Contains('Default for private clients: any remaining A query is treated as proxy')) {
+    throw "mosdns private sequence must default remaining A queries to the VPS proxy"
+}
+if (-not $template.Contains('- matches: qtype 1') -or -not $template.Contains('exec: black_hole __SERVER_IP__')) {
+    throw "mosdns private sequence must blackhole default A queries to the VPS IP"
+}
 Assert-Contains 'tag: private_overseas' 'private overseas pool'
 Assert-Contains 'tag: public_overseas' 'public overseas pool'
 Assert-Contains '__PRIVATE_QUERY_LOG_RULE__' 'private query log placeholder'

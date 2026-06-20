@@ -46,7 +46,7 @@ UE / 终端
 
 | 来源 IP | proxy/GFWList 域名 | china/ChinaList 域名 | direct/默认域名 |
 |---------|--------------------|----------------------|-----------------|
-| `172.22.0.0/16` | 返回 VPS IP，进入 TCP/QUIC 反代 | 走本机 China DNS 竞速代理 | 走专网海外 DNS 池 |
+| `172.22.0.0/16` | 返回 VPS IP，进入 TCP/QUIC 反代 | 走本机 China DNS 竞速代理 | A 记录默认返回 VPS IP，进入 TCP/QUIC 反代 |
 | 其他来源 | 不返回 VPS IP，正常解析 | 走本机 China DNS 竞速代理 | 走公网海外 DNS 池 |
 
 DNS 服务默认不返回 AAAA 记录，客户端只使用 IPv4。
@@ -238,7 +238,7 @@ SOCKS5 egress 会同时覆盖 TCP 80/443 和 UDP/443 QUIC。Xray/sing-box 的 SO
 
 ### mosdns 分流
 
-mosdns 使用不同入口区分普通 DNS 与 DoT：普通 DNS 53 对非专网来源拒绝，DoT 853 对公网开放但不向公网来源返回代理 IP。proxy/GFWList 只对专网客户端返回 VPS IP。
+mosdns 使用不同入口区分普通 DNS 与 DoT：普通 DNS 53 对非专网来源拒绝，DoT 853 对公网开放但不向公网来源返回代理 IP。专网客户端中，china/ChinaList 真实解析，direct 为人工真实解析例外，其余 A 记录默认返回 VPS IP。
 
 ### 国内解析
 
