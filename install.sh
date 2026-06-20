@@ -229,6 +229,88 @@ configure_overseas_dns() {
     note "Resolver policy saved under ${CONF_DIR}; rule updates will reuse these values."
 }
 
+normalize_egress_mode() {
+    local value="${1:-direct}"
+    value="$(printf '%s' "$value" | tr '[:upper:]' '[:lower:]')"
+    value="${value//[[:space:]]/}"
+    [[ -z "$value" ]] && value="direct"
+    case "$value" in
+        1) value="direct" ;;
+        2) value="socks5" ;;
+    esac
+    printf '%s\n' "$value"
+}
+
+validate_socks5_addr() {
+    local value="$1"
+    local host port
+
+    [[ "$value" == *:* ]] || return 1
+    host="${value%:*}"
+    port="${value##*:}"
+    [[ -n "$host" && "$port" =~ ^[0-9]+$ ]] || return 1
+    (( port >= 1 && port <= 65535 )) || return 1
+}
+
+write_egress_env() {
+    mkdir -p "$CONF_DIR"
+    cat > "${CONF_DIR}/egress.env" <<EOF
+EGRESS_MODE=${EGRESS_MODE}
+EGRESS_SOCKS5_ADDR=${EGRESS_SOCKS5_ADDR}
+EGRESS_SOCKS5_USERNAME=${EGRESS_SOCKS5_USERNAME}
+EGRESS_SOCKS5_PASSWORD=${EGRESS_SOCKS5_PASSWORD}
+EOF
+    chmod 600 "${CONF_DIR}/egress.env"
+}
+
+configure_egress_policy() {
+    # proxy 域名的 TCP 80/443 和 UDP 443 可以从本机 VPS 直接出站，
+    # 也可以交给本机 Xray/sing-box 暴露的 SOCKS5 再出站。
+    local selected addr input
+    selected="$(normalize_egress_mode "${EGRESS_MODE:-direct}")"
+    addr="${EGRESS_SOCKS5_ADDR:-127.0.0.1:1080}"
+
+    if [[ -t 0 ]]; then
+        echo ""
+        echo "Proxy egress mode:"
+        echo "  1) direct  - this VPS connects to target sites directly"
+        echo "  2) socks5  - send proxy traffic to a local SOCKS5 outbound"
+        read -r -p "Select proxy egress mode [direct/socks5, default: ${selected}]: " input
+        if [[ -n "$input" ]]; then
+            selected="$(normalize_egress_mode "$input")"
+        fi
+
+        if [[ "$selected" == "socks5" ]]; then
+            read -r -p "SOCKS5 outbound address, ip:port [${addr}]: " input
+            if [[ -n "$input" ]]; then
+                addr="$input"
+            fi
+        fi
+    fi
+
+    case "$selected" in
+        direct|socks5) ;;
+        *) err "Invalid EGRESS_MODE: ${selected}. Use direct or socks5."; exit 1 ;;
+    esac
+
+    if [[ "$selected" == "socks5" ]] && ! validate_socks5_addr "$addr"; then
+        err "Invalid EGRESS_SOCKS5_ADDR: ${addr}. Expected ip:port, for example 127.0.0.1:1080."
+        exit 1
+    fi
+
+    EGRESS_MODE="$selected"
+    EGRESS_SOCKS5_ADDR="$addr"
+    write_egress_env
+
+    if [[ "$EGRESS_MODE" == "socks5" ]]; then
+        info "Proxy egress mode: socks5 via ${EGRESS_SOCKS5_ADDR}"
+        note "Your local SOCKS5 service must be reachable from this VPS and must enable UDP for QUIC."
+    else
+        info "Proxy egress mode: direct from this VPS"
+    fi
+    note "Proxy egress policy saved to ${CONF_DIR}/egress.env"
+}
+
 
 download_file() {
     local url="$1"
@@ -318,8 +400,8 @@ Environment variables (for non-interactive use):
   PUBLIC_OVERSEAS_DNS   Overseas upstream DNS for non-private DoT clients
   SNIPROXY_DNS   Resolver upstream DNS for TCP sniproxy backends
   SNIPROXY_REBUILD Rebuild source-installed sniproxy when set to 1
-  EGRESS_MODE    TCP proxy egress mode: direct (sniproxy) or socks5 (5gpn-tcp-proxy)
-  EGRESS_SOCKS5_ADDR      SOCKS5 outbound address when EGRESS_MODE=socks5
+  EGRESS_MODE    Proxy egress mode: direct or socks5
+  EGRESS_SOCKS5_ADDR      SOCKS5 outbound address (ip:port) when EGRESS_MODE=socks5
   EGRESS_SOCKS5_USERNAME  Optional SOCKS5 username
   EGRESS_SOCKS5_PASSWORD  Optional SOCKS5 password
   EMAIL          Email for Let's Encrypt
@@ -937,13 +1019,7 @@ install_5gpn_tcp_proxy() {
     export PATH=$PATH:/usr/local/go/bin
     go build -ldflags="-s -w" -o "${BASE_DIR}/bin/5gpn-tcp-proxy" 5gpn-tcp-proxy.go
 
-    cat > "${CONF_DIR}/egress.env" <<EOF
-EGRESS_MODE=${EGRESS_MODE}
-EGRESS_SOCKS5_ADDR=${EGRESS_SOCKS5_ADDR}
-EGRESS_SOCKS5_USERNAME=${EGRESS_SOCKS5_USERNAME}
-EGRESS_SOCKS5_PASSWORD=${EGRESS_SOCKS5_PASSWORD}
-EOF
-    chmod 600 "${CONF_DIR}/egress.env"
+    write_egress_env
 
     cat > /etc/systemd/system/5gpn-tcp-proxy.service <<'EOF'
 [Unit]
@@ -1606,6 +1682,9 @@ main_install() {
 
     phase "Configure resolver policy"
     configure_overseas_dns
+
+    phase "Configure proxy egress policy"
+    configure_egress_policy
 
     phase "Build and install proxy services"
     install_sniproxy

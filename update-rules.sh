@@ -16,6 +16,7 @@ DOWNLOAD_MAX_TIME="${DOWNLOAD_MAX_TIME:-30}"
 RULE_DOWNLOAD_TOOL="${RULE_DOWNLOAD_TOOL:-auto}"
 DEFAULT_OVERSEAS_DNS=("1.1.1.1" "8.8.8.8" "9.9.9.9")
 DEFAULT_PUBLIC_OVERSEAS_DNS=("1.1.1.1" "8.8.8.8")
+SUBSCRIPTION_FILES=("proxy-urls.txt" "direct-urls.txt" "china-urls.txt" "reject-urls.txt")
 
 log() { echo "[$(date '+%F %T')] $*"; }
 warn() { echo "[!] $*" >&2; }
@@ -293,7 +294,10 @@ main() {
     mkdir -p "$RULES_DIR" "$SUBS_DIR" "$CUSTOM_DIR"
 
     for category in proxy direct china reject; do
-        touch "${CUSTOM_DIR}/${category}.txt" "${SUBS_DIR}/${category}-urls.txt"
+        touch "${CUSTOM_DIR}/${category}.txt"
+    done
+    for file in "${SUBSCRIPTION_FILES[@]}"; do
+        touch "${SUBS_DIR}/${file}"
     done
     touch "${RULES_DIR}/hosts.txt"
 

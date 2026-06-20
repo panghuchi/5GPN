@@ -13,6 +13,10 @@ function Assert-Contains {
 
 Assert-Contains $install '"5gpn-tcp-proxy.go"' 'remote bootstrap includes TCP proxy source'
 Assert-Contains $install 'install_5gpn_tcp_proxy()' 'installer builds TCP proxy'
+Assert-Contains $install 'configure_egress_policy()' 'installer prompts for egress mode'
+Assert-Contains $install 'Select proxy egress mode [direct/socks5' 'interactive egress mode selector'
+Assert-Contains $install 'SOCKS5 outbound address, ip:port' 'interactive SOCKS5 address prompt'
+Assert-Contains $install 'validate_socks5_addr()' 'SOCKS5 address validation'
 Assert-Contains $install 'EGRESS_MODE="${EGRESS_MODE:-direct}"' 'direct egress default'
 Assert-Contains $install 'EGRESS_SOCKS5_ADDR="${EGRESS_SOCKS5_ADDR:-127.0.0.1:1080}"' 'SOCKS5 default address'
 Assert-Contains $install 'systemctl restart 5gpn-tcp-proxy' 'socks5 mode starts TCP proxy'

@@ -168,7 +168,12 @@ echo 0 > /etc/mosdns/.query_log
 RULE_DOWNLOAD_TOOL=wget /usr/local/bin/update-mosdns-rules.sh
 ```
 
-## TCP SOCKS5 Egress
+## SOCKS5 Egress
+
+交互安装时脚本会询问 proxy 出站模式：
+
+- `direct`：当前 VPS 直接连接目标站点，TCP 使用 sniproxy，UDP/443 使用 quic-proxy。
+- `socks5`：当前 VPS 把 TCP 80/443 和 UDP/443 QUIC 流量交给本机 SOCKS5 出口，按提示填写 `ip:port`，例如 `127.0.0.1:1080`。
 
 默认 TCP 80/443 使用 `sniproxy` 从当前 VPS 直接出站。若你在 VPS 本机部署了 Xray/sing-box 并开放 SOCKS5，例如 `127.0.0.1:1080`，可以让 proxy 域名的 TCP 流量经该 SOCKS5 出口：
 
