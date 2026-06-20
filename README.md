@@ -1,6 +1,6 @@
 # 5GPN 5G 专网智能 DNS 与 SNI 透明反代网关
 
-5GPN 面向 5G NPN / N6 互通场景，在 VPS 或边缘服务器上部署一套轻量出口网关：mosdns 负责 DNS/DoT 分流，sniproxy 负责 TCP 80/443 的 SNI/Host 透明反代，quic-proxy 补齐 UDP 443 的 QUIC/HTTP3 场景，china-dns-race-proxy 负责国内域名解析竞速与 fallback。
+5GPN 面向 5G NPN / N6 互通场景，在 VPS 或边缘服务器上部署一套轻量出口网关：mosdns 负责 DNS/DoT 分流，sniproxy 或 5gpn-tcp-proxy 负责 TCP 80/443 的 SNI/Host 透明反代，quic-proxy 补齐 UDP 443 的 QUIC/HTTP3 场景，china-dns-race-proxy 负责国内域名解析竞速与 fallback。
 
 ## 架构概览
 
@@ -8,7 +8,7 @@
 UE / 终端
   -> 5G 专网 / N6
   -> mosdns :53/:853
-      -> proxy 域名: 返回 VPS IP -> sniproxy / quic-proxy
+      -> proxy 域名: 返回 VPS IP -> sniproxy 或 5gpn-tcp-proxy / quic-proxy
       -> china 域名: 127.0.0.1:5301 -> china-dns-race-proxy
       -> direct/默认: 海外 DNS 池
 ```
@@ -30,7 +30,8 @@ UE / 终端
 | 组件 | 协议/端口 | 作用 |
 |------|-----------|------|
 | mosdns | TCP/UDP 53, TCP 853 | 智能 DNS 分流与 DoT 服务 |
-| sniproxy | TCP 80/443 | HTTP/HTTPS SNI/Host 透明反代 |
+| sniproxy | TCP 80/443 | 默认 direct 模式 HTTP/HTTPS SNI/Host 透明反代 |
+| 5gpn-tcp-proxy | TCP 80/443 | 可选 SOCKS5 出口模式 HTTP/HTTPS SNI/Host 透明反代 |
 | quic-proxy | UDP 443 | QUIC/HTTP3 SNI 透明反代 |
 | china-dns-race-proxy | TCP/UDP 127.0.0.1:5301 | 国内 DNS 并发竞速、TCP 重试、海外 fallback |
 | Certbot | - | Let's Encrypt 证书申请与续期 |
@@ -109,6 +110,8 @@ export SNIPROXY_DNS="22.22.22.22"
 - `PRIVATE_OVERSEAS_DNS`：`172.22.0.0/16` 专网客户端默认海外解析。
 - `PUBLIC_OVERSEAS_DNS`：非专网 DoT 客户端默认海外解析。
 - `SNIPROXY_DNS`：sniproxy 后端解析 resolver，默认跟随 `PRIVATE_OVERSEAS_DNS`。
+- `EGRESS_MODE`：TCP 出口模式，`direct` 使用 sniproxy，`socks5` 使用 5gpn-tcp-proxy。
+- `EGRESS_SOCKS5_ADDR`：`EGRESS_MODE=socks5` 时的本机 SOCKS5 出口，默认 `127.0.0.1:1080`。
 - `OVERSEAS_DNS`：兼容旧参数，等同于 `PRIVATE_OVERSEAS_DNS`。
 
 配置会保存到 `/etc/mosdns/.overseas_private_dns`、`/etc/mosdns/.overseas_public_dns`、`/etc/mosdns/.sniproxy_dns`。
@@ -165,6 +168,31 @@ echo 0 > /etc/mosdns/.query_log
 RULE_DOWNLOAD_TOOL=wget /usr/local/bin/update-mosdns-rules.sh
 ```
 
+## TCP SOCKS5 Egress
+
+默认 TCP 80/443 使用 `sniproxy` 从当前 VPS 直接出站。若你在 VPS 本机部署了 Xray/sing-box 并开放 SOCKS5，例如 `127.0.0.1:1080`，可以让 proxy 域名的 TCP 流量经该 SOCKS5 出口：
+
+```bash
+export EGRESS_MODE=socks5
+export EGRESS_SOCKS5_ADDR="127.0.0.1:1080"
+bash -c "$(curl -fsSL https://raw.githubusercontent.com/panghuchi/5GPN/main/install.sh)"
+```
+
+也可以安装后修改：
+
+```bash
+cat > /opt/proxy-gateway/etc/egress.env <<'EOF'
+EGRESS_MODE=socks5
+EGRESS_SOCKS5_ADDR=127.0.0.1:1080
+EGRESS_SOCKS5_USERNAME=
+EGRESS_SOCKS5_PASSWORD=
+EOF
+systemctl restart 5gpn-tcp-proxy
+systemctl stop sniproxy
+```
+
+当前版本 SOCKS5 egress 只覆盖 TCP 80/443。UDP/443 QUIC 仍由 `quic-proxy` 直接出站，后续版本再扩展 UDP 出口。
+
 ## 关键文件
 
 | 文件 | 说明 |
@@ -174,6 +202,7 @@ RULE_DOWNLOAD_TOOL=wget /usr/local/bin/update-mosdns-rules.sh
 | `update-rules.sh` | 规则更新与订阅合并脚本 |
 | `renew-hook.sh` | 证书续期 Hook |
 | `sniproxy.conf` | sniproxy 配置模板 |
+| `5gpn-tcp-proxy.go` | 支持 direct/SOCKS5 出口的 TCP Host/SNI 代理源码 |
 | `quic-proxy.go` | QUIC SNI 代理源码 |
 | `china-dns-race-proxy.go` | 国内 DNS 竞速代理源码 |
 

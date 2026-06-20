@@ -22,6 +22,10 @@ DEFAULT_OVERSEAS_DNS=("1.1.1.1" "8.8.8.8" "9.9.9.9")
 DEFAULT_PUBLIC_OVERSEAS_DNS=("1.1.1.1" "8.8.8.8")
 MOSDNS_VERSION="${MOSDNS_VERSION:-latest}"
 SSH_PORT="${SSH_PORT:-26941}"
+EGRESS_MODE="${EGRESS_MODE:-direct}"
+EGRESS_SOCKS5_ADDR="${EGRESS_SOCKS5_ADDR:-127.0.0.1:1080}"
+EGRESS_SOCKS5_USERNAME="${EGRESS_SOCKS5_USERNAME:-}"
+EGRESS_SOCKS5_PASSWORD="${EGRESS_SOCKS5_PASSWORD:-}"
 
 REPO_OWNER="${REPO_OWNER:-panghuchi}"
 REPO_NAME="${REPO_NAME:-5GPN}"
@@ -29,6 +33,7 @@ REPO_BRANCH="${REPO_BRANCH:-main}"
 REPO_RAW_BASE="https://raw.githubusercontent.com/${REPO_OWNER}/${REPO_NAME}/${REPO_BRANCH}"
 REQUIRED_PROJECT_FILES=(
     "quic-proxy.go"
+    "5gpn-tcp-proxy.go"
     "china-dns-race-proxy.go"
     "mosdns_config.yaml"
     "sniproxy.conf"
@@ -313,6 +318,10 @@ Environment variables (for non-interactive use):
   PUBLIC_OVERSEAS_DNS   Overseas upstream DNS for non-private DoT clients
   SNIPROXY_DNS   Resolver upstream DNS for TCP sniproxy backends
   SNIPROXY_REBUILD Rebuild source-installed sniproxy when set to 1
+  EGRESS_MODE    TCP proxy egress mode: direct (sniproxy) or socks5 (5gpn-tcp-proxy)
+  EGRESS_SOCKS5_ADDR      SOCKS5 outbound address when EGRESS_MODE=socks5
+  EGRESS_SOCKS5_USERNAME  Optional SOCKS5 username
+  EGRESS_SOCKS5_PASSWORD  Optional SOCKS5 password
   EMAIL          Email for Let's Encrypt
 EOF
 }
@@ -912,6 +921,65 @@ EOF
 }
 
 # =============================================================================
+# 5gpn-tcp-proxy (TCP Host/SNI proxy with SOCKS5 egress)
+# =============================================================================
+install_5gpn_tcp_proxy() {
+    case "$EGRESS_MODE" in
+        direct|socks5) ;;
+        *) err "Invalid EGRESS_MODE: ${EGRESS_MODE}. Use direct or socks5."; exit 1 ;;
+    esac
+
+    info "Compiling 5gpn-tcp-proxy (TCP Host/SNI proxy with optional SOCKS5 egress)..."
+    mkdir -p "${BASE_DIR}/bin" "${SRC_DIR}" "${CONF_DIR}"
+    cp "${SCRIPT_DIR}/5gpn-tcp-proxy.go" "${SRC_DIR}/5gpn-tcp-proxy.go"
+    cd "${SRC_DIR}"
+
+    export PATH=$PATH:/usr/local/go/bin
+    go build -ldflags="-s -w" -o "${BASE_DIR}/bin/5gpn-tcp-proxy" 5gpn-tcp-proxy.go
+
+    cat > "${CONF_DIR}/egress.env" <<EOF
+EGRESS_MODE=${EGRESS_MODE}
+EGRESS_SOCKS5_ADDR=${EGRESS_SOCKS5_ADDR}
+EGRESS_SOCKS5_USERNAME=${EGRESS_SOCKS5_USERNAME}
+EGRESS_SOCKS5_PASSWORD=${EGRESS_SOCKS5_PASSWORD}
+EOF
+    chmod 600 "${CONF_DIR}/egress.env"
+
+    cat > /etc/systemd/system/5gpn-tcp-proxy.service <<'EOF'
+[Unit]
+Description=5GPN TCP Host/SNI proxy
+After=network.target
+
+[Service]
+Type=simple
+Environment="EGRESS_MODE=direct"
+Environment="EGRESS_SOCKS5_ADDR=127.0.0.1:1080"
+Environment="EGRESS_SOCKS5_USERNAME="
+Environment="EGRESS_SOCKS5_PASSWORD="
+EnvironmentFile=-/opt/proxy-gateway/etc/egress.env
+ExecStart=/opt/proxy-gateway/bin/5gpn-tcp-proxy -http=0.0.0.0:80 -https=0.0.0.0:443 -egress=${EGRESS_MODE} -socks5=${EGRESS_SOCKS5_ADDR} -socks5-user=${EGRESS_SOCKS5_USERNAME} -socks5-pass=${EGRESS_SOCKS5_PASSWORD}
+Restart=on-failure
+RestartSec=5
+User=root
+LimitNOFILE=65535
+
+[Install]
+WantedBy=multi-user.target
+EOF
+
+    systemctl daemon-reload
+    if [[ "$EGRESS_MODE" == "socks5" ]]; then
+        systemctl enable 5gpn-tcp-proxy
+        systemctl disable sniproxy 2>/dev/null || true
+        note "TCP egress mode: socks5 via ${EGRESS_SOCKS5_ADDR}; 5gpn-tcp-proxy will bind TCP 80/443."
+    else
+        systemctl disable 5gpn-tcp-proxy 2>/dev/null || true
+        note "TCP egress mode: direct; sniproxy will bind TCP 80/443."
+    fi
+    ok "5gpn-tcp-proxy installed"
+}
+
+# =============================================================================
 # quic-proxy (UDP / QUIC SNI proxy)
 # =============================================================================
 install_quic_proxy() {
@@ -1365,7 +1433,13 @@ start_services() {
     info "Starting services..."
     systemctl restart china-dns-race-proxy || { err "china-dns-race-proxy failed to start"; journalctl -u china-dns-race-proxy --no-pager -n 20; exit 1; }
     systemctl restart mosdns || { err "mosdns failed to start"; journalctl -u mosdns --no-pager -n 30; exit 1; }
-    systemctl restart sniproxy || { err "sniproxy failed to start"; journalctl -u sniproxy --no-pager -n 20; exit 1; }
+    if [[ "$EGRESS_MODE" == "socks5" ]]; then
+        systemctl stop sniproxy 2>/dev/null || true
+        systemctl restart 5gpn-tcp-proxy || { err "5gpn-tcp-proxy failed to start"; journalctl -u 5gpn-tcp-proxy --no-pager -n 20; exit 1; }
+    else
+        systemctl stop 5gpn-tcp-proxy 2>/dev/null || true
+        systemctl restart sniproxy || { err "sniproxy failed to start"; journalctl -u sniproxy --no-pager -n 20; exit 1; }
+    fi
     systemctl restart quic-proxy || { err "quic-proxy failed to start"; journalctl -u quic-proxy --no-pager -n 20; exit 1; }
     ok "All services started"
 }
@@ -1416,7 +1490,7 @@ show_status() {
     echo "=========================================="
     echo "      Proxy Gateway Status"
     echo "=========================================="
-    for svc in mosdns sniproxy quic-proxy china-dns-race-proxy; do
+    for svc in mosdns sniproxy 5gpn-tcp-proxy quic-proxy china-dns-race-proxy; do
         status=$(systemctl is-active "$svc" 2>/dev/null || echo "unknown")
         if [[ "$status" == "active" ]]; then
             echo -e "$svc: ${GREEN}running${NC}"
@@ -1429,17 +1503,20 @@ show_status() {
         echo "Domain: $(cat "${CONF_DIR}/.domain")"
     fi
     echo "Public IP: ${PUBLIC_IP:-N/A}"
+    if [[ -f "${CONF_DIR}/egress.env" ]]; then
+        echo "TCP egress: $(grep -E '^EGRESS_MODE=' "${CONF_DIR}/egress.env" | cut -d= -f2-) ($(grep -E '^EGRESS_SOCKS5_ADDR=' "${CONF_DIR}/egress.env" | cut -d= -f2-))"
+    fi
     echo "=========================================="
 }
 
 do_uninstall() {
-    warn "This will remove sniproxy, quic-proxy, china-dns-race-proxy, mosdns configs, and rules."
+    warn "This will remove sniproxy, 5gpn-tcp-proxy, quic-proxy, china-dns-race-proxy, mosdns configs, and rules."
     read -r -p "Are you sure? [y/N]: " confirm
     [[ "$confirm" =~ ^[Yy]$ ]] || { info "Uninstall cancelled"; exit 0; }
 
-    systemctl stop mosdns sniproxy quic-proxy china-dns-race-proxy 2>/dev/null || true
-    systemctl disable mosdns sniproxy quic-proxy china-dns-race-proxy 2>/dev/null || true
-    rm -f /etc/systemd/system/{mosdns,sniproxy,quic-proxy,china-dns-race-proxy,update-mosdns-rules}.*
+    systemctl stop mosdns sniproxy 5gpn-tcp-proxy quic-proxy china-dns-race-proxy 2>/dev/null || true
+    systemctl disable mosdns sniproxy 5gpn-tcp-proxy quic-proxy china-dns-race-proxy 2>/dev/null || true
+    rm -f /etc/systemd/system/{mosdns,sniproxy,5gpn-tcp-proxy,quic-proxy,china-dns-race-proxy,update-mosdns-rules}.*
     systemctl daemon-reload
 
     rm -rf "$BASE_DIR" /etc/sniproxy.conf /etc/mosdns /usr/local/bin/update-mosdns-rules.sh
@@ -1531,6 +1608,7 @@ main_install() {
 
     phase "Build and install proxy services"
     install_sniproxy
+    install_5gpn_tcp_proxy
     install_quic_proxy
     install_china_dns_race_proxy
 
@@ -1553,7 +1631,11 @@ main_install() {
     echo -e "${BOLD}${GREEN}============================================================${NC}"
     echo ""
     echo "DoT endpoint: tls://${DOMAIN}:853"
-    echo "TCP proxy:   ${PUBLIC_IP}:80, ${PUBLIC_IP}:443 (sniproxy)"
+    if [[ "$EGRESS_MODE" == "socks5" ]]; then
+        echo "TCP proxy:   ${PUBLIC_IP}:80, ${PUBLIC_IP}:443 (5gpn-tcp-proxy -> ${EGRESS_SOCKS5_ADDR})"
+    else
+        echo "TCP proxy:   ${PUBLIC_IP}:80, ${PUBLIC_IP}:443 (sniproxy)"
+    fi
     echo "UDP proxy:   ${PUBLIC_IP}:443 (quic-proxy)"
     echo "DNS service: ${PUBLIC_IP}:53"
     echo "Install log: ${INSTALL_LOG:-${LOG_DIR}/install-*.log}"
