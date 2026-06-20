@@ -3,6 +3,8 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 $templatePath = Join-Path $root "mosdns_config.yaml"
 $template = Get-Content -Path $templatePath -Raw -Encoding UTF8
+$install = Get-Content -Path (Join-Path $root "install.sh") -Raw -Encoding UTF8
+$rules = Get-Content -Path (Join-Path $root "update-rules.sh") -Raw -Encoding UTF8
 
 function Assert-Contains {
     param([string]$Needle, [string]$Description)
@@ -12,6 +14,12 @@ function Assert-Contains {
 Assert-Contains 'http: "127.0.0.1:8080"' 'local-only mosdns API'
 if ($template.Contains('include: []')) {
     throw "mosdns template must not use include: [] because mosdns v5 expects include to be a map"
+}
+if (-not $install.Contains('content = content.replace("\ninclude: []\n", "\n")')) {
+    throw "install.sh must scrub stale include: [] from rendered mosdns config"
+}
+if (-not $rules.Contains("content = content.replace('\ninclude: []\n', '\n')")) {
+    throw "update-rules.sh must scrub stale include: [] from rendered mosdns config"
 }
 Assert-Contains 'type: ip_set' 'private source network set'
 Assert-Contains '172.22.0.0/16' 'NPN client CIDR'

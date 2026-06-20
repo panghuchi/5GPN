@@ -250,6 +250,7 @@ import sys
 src, server_ip, private_upstreams, public_upstreams, dst = sys.argv[1:6]
 with open(src, 'r', encoding='utf-8') as f:
     content = f.read()
+content = content.replace('\ninclude: []\n', '\n')
 content = content.replace('__SERVER_IP__', server_ip)
 content = content.replace('__PRIVATE_OVERSEAS_UPSTREAMS__', private_upstreams.rstrip() or '        - addr: "udp://1.1.1.1:53"')
 content = content.replace('__PUBLIC_OVERSEAS_UPSTREAMS__', public_upstreams.rstrip() or '        - addr: "udp://1.1.1.1:53"')
