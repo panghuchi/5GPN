@@ -28,6 +28,7 @@ var (
 	raceTCPDelay      = flag.Duration("tcp-delay", 150*time.Millisecond, "Delay before retrying primary upstreams over TCP")
 	raceFallbackDelay = flag.Duration("fallback-delay", 750*time.Millisecond, "Delay before querying fallback upstreams")
 	raceTimeout       = flag.Duration("timeout", 2*time.Second, "Per-query timeout")
+	raceECS           = flag.String("ecs", "139.226.48.0/24", "EDNS Client Subnet CIDR for China CDN locality; empty disables ECS")
 )
 
 func main() {
@@ -54,6 +55,11 @@ func main() {
 	log.Printf("China DNS race proxy listening on %s (udp/tcp)", *raceListenAddr)
 	log.Printf("primary upstreams: %s", strings.Join(primary, ","))
 	log.Printf("fallback upstreams: %s", strings.Join(fallback, ","))
+	if strings.TrimSpace(*raceECS) == "" {
+		log.Printf("edns client subnet: disabled")
+	} else {
+		log.Printf("edns client subnet: %s", *raceECS)
+	}
 	log.Printf("tcp delay: %s; fallback delay: %s; timeout: %s", *raceTCPDelay, *raceFallbackDelay, *raceTimeout)
 
 	go serveTCP(tcpListener, primary, fallback, *raceTCPDelay, *raceFallbackDelay, *raceTimeout)
@@ -154,6 +160,14 @@ func raceQuery(query []byte, primary []string, fallback []string, tcpDelay time.
 	}
 	if fallbackDelay < tcpDelay {
 		fallbackDelay = tcpDelay
+	}
+	if strings.TrimSpace(*raceECS) != "" {
+		ecsQuery, err := addEDNSClientSubnet(query, *raceECS)
+		if err != nil {
+			log.Printf("ECS injection skipped: %v", err)
+		} else {
+			query = ecsQuery
+		}
 	}
 
 	responses := make(chan []byte, len(primary)*2+len(fallback))
@@ -332,6 +346,165 @@ func dnsErrorResponse(query []byte, rcode byte) []byte {
 	response[10] = 0
 	response[11] = 0
 	return response
+}
+
+func addEDNSClientSubnet(query []byte, cidr string) ([]byte, error) {
+	option, err := buildECSOption(cidr)
+	if err != nil {
+		return nil, err
+	}
+	out := append([]byte(nil), query...)
+	if len(out) < 12 {
+		return nil, errors.New("query too short")
+	}
+
+	qdCount := int(binary.BigEndian.Uint16(out[4:6]))
+	anCount := int(binary.BigEndian.Uint16(out[6:8]))
+	nsCount := int(binary.BigEndian.Uint16(out[8:10]))
+	arCount := int(binary.BigEndian.Uint16(out[10:12]))
+
+	offset := 12
+	var err error
+	for i := 0; i < qdCount; i++ {
+		offset, err = skipDNSName(out, offset)
+		if err != nil {
+			return nil, err
+		}
+		if offset+4 > len(out) {
+			return nil, errors.New("truncated question")
+		}
+		offset += 4
+	}
+	for i := 0; i < anCount+nsCount; i++ {
+		offset, err = skipDNSRR(out, offset)
+		if err != nil {
+			return nil, err
+		}
+	}
+
+	arOffset := offset
+	for i := 0; i < arCount; i++ {
+		nameEnd, err := skipDNSName(out, arOffset)
+		if err != nil {
+			return nil, err
+		}
+		if nameEnd+10 > len(out) {
+			return nil, errors.New("truncated additional record")
+		}
+		rrType := binary.BigEndian.Uint16(out[nameEnd : nameEnd+2])
+		rdLenOffset := nameEnd + 8
+		rdLen := int(binary.BigEndian.Uint16(out[rdLenOffset : rdLenOffset+2]))
+		rdataStart := nameEnd + 10
+		rdataEnd := rdataStart + rdLen
+		if rdataEnd > len(out) {
+			return nil, errors.New("truncated additional rdata")
+		}
+		if rrType == 41 {
+			newLen := rdLen + len(option)
+			if newLen > 65535 {
+				return nil, errors.New("OPT rdata too large")
+			}
+			updated := make([]byte, 0, len(out)+len(option))
+			updated = append(updated, out[:rdataEnd]...)
+			updated = append(updated, option...)
+			updated = append(updated, out[rdataEnd:]...)
+			binary.BigEndian.PutUint16(updated[rdLenOffset:rdLenOffset+2], uint16(newLen))
+			return updated, nil
+		}
+		arOffset = rdataEnd
+	}
+
+	opt := make([]byte, 0, 11+len(option))
+	opt = append(opt, 0)
+	opt = binary.BigEndian.AppendUint16(opt, 41)
+	opt = binary.BigEndian.AppendUint16(opt, 1232)
+	opt = binary.BigEndian.AppendUint32(opt, 0)
+	opt = binary.BigEndian.AppendUint16(opt, uint16(len(option)))
+	opt = append(opt, option...)
+	out = append(out, opt...)
+	binary.BigEndian.PutUint16(out[10:12], uint16(arCount+1))
+	return out, nil
+}
+
+func buildECSOption(cidr string) ([]byte, error) {
+	ip, network, err := net.ParseCIDR(strings.TrimSpace(cidr))
+	if err != nil {
+		return nil, err
+	}
+	ones, _ := network.Mask.Size()
+	var family uint16
+	var raw []byte
+	if v4 := ip.To4(); v4 != nil {
+		family = 1
+		raw = v4
+	} else if v6 := ip.To16(); v6 != nil {
+		family = 2
+		raw = v6
+	} else {
+		return nil, errors.New("invalid ECS IP")
+	}
+
+	addrLen := (ones + 7) / 8
+	if addrLen > len(raw) {
+		return nil, errors.New("invalid ECS prefix length")
+	}
+	addr := append([]byte(nil), raw[:addrLen]...)
+	if remainder := ones % 8; remainder != 0 && len(addr) > 0 {
+		addr[len(addr)-1] &= byte(0xff << (8 - remainder))
+	}
+
+	payload := make([]byte, 0, 4+len(addr))
+	payload = binary.BigEndian.AppendUint16(payload, family)
+	payload = append(payload, byte(ones), 0)
+	payload = append(payload, addr...)
+
+	option := make([]byte, 0, 4+len(payload))
+	option = binary.BigEndian.AppendUint16(option, 8)
+	option = binary.BigEndian.AppendUint16(option, uint16(len(payload)))
+	option = append(option, payload...)
+	return option, nil
+}
+
+func skipDNSName(packet []byte, offset int) (int, error) {
+	for {
+		if offset >= len(packet) {
+			return 0, errors.New("truncated name")
+		}
+		labelLen := int(packet[offset])
+		offset++
+		if labelLen == 0 {
+			return offset, nil
+		}
+		if labelLen&0xc0 == 0xc0 {
+			if offset >= len(packet) {
+				return 0, errors.New("truncated compression pointer")
+			}
+			return offset + 1, nil
+		}
+		if labelLen&0xc0 != 0 {
+			return 0, errors.New("invalid label")
+		}
+		if offset+labelLen > len(packet) {
+			return 0, errors.New("truncated label")
+		}
+		offset += labelLen
+	}
+}
+
+func skipDNSRR(packet []byte, offset int) (int, error) {
+	nameEnd, err := skipDNSName(packet, offset)
+	if err != nil {
+		return 0, err
+	}
+	if nameEnd+10 > len(packet) {
+		return 0, errors.New("truncated resource record")
+	}
+	rdLen := int(binary.BigEndian.Uint16(packet[nameEnd+8 : nameEnd+10]))
+	end := nameEnd + 10 + rdLen
+	if end > len(packet) {
+		return 0, errors.New("truncated resource record data")
+	}
+	return end, nil
 }
 
 func parseUpstreamList(input string) []string {
