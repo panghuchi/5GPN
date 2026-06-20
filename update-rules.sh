@@ -96,6 +96,27 @@ trim_domain() {
     printf '%s\n' "$domain"
 }
 
+normalize_domain_file() {
+    local input="$1"
+    local output="$2"
+
+    awk '
+        {
+            sub(/\r$/, "")
+            sub(/#.*/, "")
+            sub(/\/.*/, "")
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+            sub(/^\*\./, "")
+            sub(/^\./, "")
+            sub(/^www\./, "")
+            sub(/\.$/, "")
+            if ($0 ~ /^[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?)+$/) {
+                print tolower($0)
+            }
+        }
+    ' "$input" >> "$output"
+}
+
 render_mosdns_upstreams() {
     local input="${1:-}"
     local dns_list=()
@@ -122,23 +143,23 @@ append_subscription_domains() {
     local urls_file="${SUBS_DIR}/${category}-urls.txt"
     [[ -f "$urls_file" ]] || return 0
 
-    local url tmp line domain count=0
+    local url tmp normalized before after count=0
     while IFS= read -r url || [[ -n "$url" ]]; do
         url="${url%%#*}"
         url="$(echo "$url" | xargs 2>/dev/null || true)"
         [[ -z "$url" ]] && continue
         tmp="$(mktemp)"
+        normalized="$(mktemp)"
         if download_rules_file "$tmp" "$url"; then
-            while IFS= read -r line || [[ -n "$line" ]]; do
-                if domain=$(trim_domain "$line"); then
-                    echo "$domain" >> "$output"
-                    count=$((count + 1))
-                fi
-            done < "$tmp"
+            before=$(wc -l < "$output" 2>/dev/null || echo 0)
+            normalize_domain_file "$tmp" "$normalized"
+            cat "$normalized" >> "$output"
+            after=$(wc -l < "$output" 2>/dev/null || echo 0)
+            count=$((count + after - before))
         else
             warn "Failed to download ${category} subscription: $url"
         fi
-        rm -f "$tmp"
+        rm -f "$tmp" "$normalized"
     done < "$urls_file"
     log "${category} subscription domains appended: ${count}"
 }
@@ -147,13 +168,12 @@ append_local_domains() {
     local input="$1"
     local output="$2"
     [[ -f "$input" ]] || return 0
-    local line domain count=0
-    while IFS= read -r line || [[ -n "$line" ]]; do
-        if domain=$(trim_domain "$line"); then
-            echo "$domain" >> "$output"
-            count=$((count + 1))
-        fi
-    done < "$input"
+    local normalized count=0
+    normalized="$(mktemp)"
+    normalize_domain_file "$input" "$normalized"
+    count=$(wc -l < "$normalized" 2>/dev/null || echo 0)
+    cat "$normalized" >> "$output"
+    rm -f "$normalized"
     log "$(basename "$input") local domains appended: ${count}"
 }
 
@@ -195,7 +215,20 @@ build_chinalist() {
     : > "$output"
     log "Downloading ChinaList..."
     if download_rules_file "$raw" "$CHINALIST_URL" "$CHINALIST_FALLBACK_URL"; then
-        grep -oP 'server=/\K[^/]+' "$raw" | while IFS= read -r line; do trim_domain "$line" || true; done | sort -u > "$output"
+        awk -F/ '/^server=\/[^/]+\// { print $2 }' "$raw" | \
+            awk '
+                {
+                    sub(/\r$/, "")
+                    gsub(/^[[:space:]]+|[[:space:]]+$/, "")
+                    sub(/^\*\./, "")
+                    sub(/^\./, "")
+                    sub(/^www\./, "")
+                    sub(/\.$/, "")
+                    if ($0 ~ /^[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?)+$/) {
+                        print tolower($0)
+                    }
+                }
+            ' | sort -u > "$output"
         log "ChinaList generated: $(wc -l < "$output") domains"
     else
         warn "ChinaList download failed; keeping empty generated list"
