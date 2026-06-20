@@ -364,11 +364,11 @@ func addEDNSClientSubnet(query []byte, cidr string) ([]byte, error) {
 	arCount := int(binary.BigEndian.Uint16(out[10:12]))
 
 	offset := 12
-	var err error
+	var parseErr error
 	for i := 0; i < qdCount; i++ {
-		offset, err = skipDNSName(out, offset)
-		if err != nil {
-			return nil, err
+		offset, parseErr = skipDNSName(out, offset)
+		if parseErr != nil {
+			return nil, parseErr
 		}
 		if offset+4 > len(out) {
 			return nil, errors.New("truncated question")
@@ -376,9 +376,9 @@ func addEDNSClientSubnet(query []byte, cidr string) ([]byte, error) {
 		offset += 4
 	}
 	for i := 0; i < anCount+nsCount; i++ {
-		offset, err = skipDNSRR(out, offset)
-		if err != nil {
-			return nil, err
+		offset, parseErr = skipDNSRR(out, offset)
+		if parseErr != nil {
+			return nil, parseErr
 		}
 	}
 
