@@ -983,18 +983,14 @@ EOF
 # quic-proxy (UDP / QUIC SNI proxy)
 # =============================================================================
 install_quic_proxy() {
-    if [[ ! -x "${BASE_DIR}/bin/quic-proxy" ]]; then
-        info "Compiling quic-proxy (UDP/QUIC SNI proxy)..."
-        mkdir -p "${BASE_DIR}/bin"
-        mkdir -p "${SRC_DIR}"
-        cp "${SCRIPT_DIR}/quic-proxy.go" "${SRC_DIR}/quic-proxy.go"
-        cd "${SRC_DIR}"
+    info "Compiling quic-proxy (UDP/QUIC SNI proxy)..."
+    mkdir -p "${BASE_DIR}/bin"
+    mkdir -p "${SRC_DIR}"
+    cp "${SCRIPT_DIR}/quic-proxy.go" "${SRC_DIR}/quic-proxy.go"
+    cd "${SRC_DIR}"
 
-        export PATH=$PATH:/usr/local/go/bin
-        go build -ldflags="-s -w" -o "${BASE_DIR}/bin/quic-proxy" quic-proxy.go
-    else
-        info "quic-proxy already compiled"
-    fi
+    export PATH=$PATH:/usr/local/go/bin
+    go build -ldflags="-s -w" -o "${BASE_DIR}/bin/quic-proxy" quic-proxy.go
 
     # systemd service
     cat > /etc/systemd/system/quic-proxy.service <<'EOF'
