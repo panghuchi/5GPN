@@ -975,8 +975,9 @@ Before=mosdns.service
 [Service]
 Type=simple
 Environment="CHINA_DNS_ECS=139.226.48.0/24"
+Environment="CHINA_DNS_UPSTREAMS=223.5.5.5:53,223.6.6.6:53"
 EnvironmentFile=-/opt/proxy-gateway/etc/china-dns-race-proxy.env
-ExecStart=/opt/proxy-gateway/bin/china-dns-race-proxy -l 127.0.0.1:5301 -ecs ${CHINA_DNS_ECS}
+ExecStart=/opt/proxy-gateway/bin/china-dns-race-proxy -l 127.0.0.1:5301 -upstreams ${CHINA_DNS_UPSTREAMS} -ecs ${CHINA_DNS_ECS}
 Restart=on-failure
 RestartSec=3
 User=root

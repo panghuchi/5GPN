@@ -23,7 +23,7 @@ import (
 
 var (
 	raceListenAddr    = flag.String("l", "127.0.0.1:5301", "Listen address")
-	raceUpstreams     = flag.String("upstreams", "101.226.4.6:53,218.30.118.6:53,180.76.76.76:53,119.29.29.29:53", "Primary DNS upstreams")
+	raceUpstreams     = flag.String("upstreams", "223.5.5.5:53,223.6.6.6:53", "Primary DNS upstreams")
 	raceFallbacks     = flag.String("fallback-upstreams", "1.1.1.1:53,8.8.8.8:53,22.22.22.22:53", "Fallback DNS upstreams")
 	raceTCPDelay      = flag.Duration("tcp-delay", 150*time.Millisecond, "Delay before retrying primary upstreams over TCP")
 	raceFallbackDelay = flag.Duration("fallback-delay", 750*time.Millisecond, "Delay before querying fallback upstreams")
