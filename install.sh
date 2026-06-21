@@ -42,6 +42,7 @@ REQUIRED_PROJECT_FILES=(
     "quic-proxy.go"
     "5gpn-tcp-proxy.go"
     "china-dns-race-proxy.go"
+    "dnsdist.conf.template"
     "mosdns_config.yaml"
     "sniproxy.conf"
     "renew-hook.sh"
@@ -201,6 +202,34 @@ render_mosdns_client_cidrs() {
     if [[ "$has_loopback" == "0" ]]; then
         printf '        - "127.0.0.1/32"\n'
     fi
+}
+
+render_dnsdist_client_cidrs() {
+    local input="${1:-}"
+    local cidr_list=()
+    local cidr first=1
+
+    if [[ -z "$input" ]]; then
+        cidr_list=("${DEFAULT_NPN_CLIENT_CIDRS[@]}")
+    else
+        input="${input//,/ }"
+        read -r -a cidr_list <<< "$input"
+    fi
+
+    for cidr in "${cidr_list[@]}"; do
+        [[ -z "$cidr" ]] && continue
+        if [[ ! "$cidr" =~ ^[0-9A-Fa-f:.]+/[0-9]{1,3}$ ]]; then
+            warn "Skipping invalid dnsdist NPN client CIDR: $cidr"
+            continue
+        fi
+        if [[ "$first" == "0" ]]; then
+            printf ', '
+        fi
+        printf '"%s"' "$cidr"
+        first=0
+    done
+
+    [[ "$first" == "0" ]] || printf '"172.22.0.0/16"'
 }
 
 dns_query_log_enabled() {
@@ -909,7 +938,7 @@ install_deps() {
                 iproute2 procps lsof net-tools \
                 libev-dev libssl-dev \
                 autoconf automake libtool pkg-config \
-                certbot \
+                certbot dnsdist \
                 python3 jq libcap2-bin \
                 nftables
             apt-get install -y -qq libpcre3-dev >>"${INSTALL_LOG:-/tmp/5gpn-install.log}" 2>&1 || \
@@ -922,7 +951,7 @@ install_deps() {
                 iproute procps-ng lsof net-tools \
                 libev-devel pcre-devel openssl-devel \
                 autoconf automake libtool pkgconfig \
-                certbot \
+                certbot dnsdist \
                 python3 jq libcap-ng-utils \
                 nftables
             "$PKG_MGR" install -y -q udns-devel >>"${INSTALL_LOG:-/tmp/5gpn-install.log}" 2>&1 || true
@@ -960,7 +989,7 @@ install_deps() {
     fi
 
     # Verify critical binaries
-    for bin in certbot; do
+    for bin in certbot dnsdist; do
         if ! command -v "$bin" >/dev/null 2>&1; then
             err "Required package '$bin' was not installed successfully."
             err "Please check your package manager output above."
@@ -1072,13 +1101,22 @@ copy_mosdns_cert() {
         return 1
     fi
 
-    info "Copying certificates to /etc/mosdns/certs/ ..."
-    mkdir -p /etc/mosdns/certs
+    info "Copying certificates to /etc/mosdns/certs/ and /etc/dnsdist/certs/ ..."
+    mkdir -p /etc/mosdns/certs /etc/dnsdist/certs
     cp "${cert_live_dir}/fullchain.pem" /etc/mosdns/certs/fullchain.pem
     cp "${cert_live_dir}/privkey.pem" /etc/mosdns/certs/privkey.pem
+    cp "${cert_live_dir}/fullchain.pem" /etc/dnsdist/certs/fullchain.pem
+    cp "${cert_live_dir}/privkey.pem" /etc/dnsdist/certs/privkey.pem
     chmod 644 /etc/mosdns/certs/fullchain.pem
     chmod 600 /etc/mosdns/certs/privkey.pem
-    ok "Certificates copied to /etc/mosdns/certs/"
+    chmod 644 /etc/dnsdist/certs/fullchain.pem
+    chmod 640 /etc/dnsdist/certs/privkey.pem
+    if id _dnsdist >/dev/null 2>&1; then
+        chown -R _dnsdist:_dnsdist /etc/dnsdist/certs
+    elif id dnsdist >/dev/null 2>&1; then
+        chown -R dnsdist:dnsdist /etc/dnsdist/certs
+    fi
+    ok "Certificates copied to mosdns and dnsdist cert directories"
 }
 
 # =============================================================================
@@ -1467,11 +1505,58 @@ AmbientCapabilities=CAP_NET_BIND_SERVICE
 WantedBy=multi-user.target
 EOF
 
-    systemctl stop dnsdist dnsdist.socket 2>/dev/null || true
-    systemctl disable dnsdist dnsdist.socket 2>/dev/null || true
     systemctl daemon-reload
     systemctl enable mosdns
     ok "mosdns configured"
+}
+
+install_dnsdist_frontend() {
+    info "Configuring dnsdist DoT frontend..."
+    if ! command -v dnsdist >/dev/null 2>&1; then
+        err "dnsdist binary not found. Please install dnsdist or rerun dependency installation."
+        exit 1
+    fi
+    if [[ ! -f "${SCRIPT_DIR}/dnsdist.conf.template" ]]; then
+        err "dnsdist.conf.template not found in ${SCRIPT_DIR}"
+        exit 1
+    fi
+
+    mkdir -p /etc/dnsdist/certs
+    cp "${SCRIPT_DIR}/dnsdist.conf.template" /etc/dnsdist/dnsdist.conf.template
+
+    local npn_client_cidrs_lua
+    npn_client_cidrs_lua="$(render_dnsdist_client_cidrs "$NPN_CLIENT_CIDRS")"
+    python3 - /etc/dnsdist/dnsdist.conf.template "$npn_client_cidrs_lua" /etc/dnsdist/dnsdist.conf <<'PYEOF'
+import sys
+template_path, npn_client_cidrs_lua, output_path = sys.argv[1:4]
+with open(template_path, "r", encoding="utf-8") as f:
+    content = f.read()
+content = content.replace("__NPN_CLIENT_CIDRS_LUA__", npn_client_cidrs_lua)
+with open(output_path, "w", encoding="utf-8") as f:
+    f.write(content)
+PYEOF
+
+    if ! dnsdist --check-config -C /etc/dnsdist/dnsdist.conf >/dev/null 2>&1; then
+        err "Generated dnsdist configuration failed validation"
+        dnsdist --check-config -C /etc/dnsdist/dnsdist.conf || true
+        exit 1
+    fi
+
+    local dnsdist_bin
+    dnsdist_bin="$(command -v dnsdist)"
+    mkdir -p /etc/systemd/system/dnsdist.service.d
+    cat > /etc/systemd/system/dnsdist.service.d/override.conf <<EOF
+[Service]
+ExecStart=
+ExecStart=${dnsdist_bin} --supervised -C /etc/dnsdist/dnsdist.conf
+Restart=on-failure
+RestartSec=3
+LimitNOFILE=1048576
+EOF
+    systemctl disable dnsdist.socket 2>/dev/null || true
+    systemctl daemon-reload
+    systemctl enable dnsdist
+    ok "dnsdist DoT frontend configured"
 }
 
 # =============================================================================
@@ -1746,6 +1831,7 @@ start_services() {
     info "Starting services..."
     systemctl restart china-dns-race-proxy || { err "china-dns-race-proxy failed to start"; journalctl -u china-dns-race-proxy --no-pager -n 20; exit 1; }
     systemctl restart mosdns || { err "mosdns failed to start"; journalctl -u mosdns --no-pager -n 30; exit 1; }
+    systemctl restart dnsdist || { err "dnsdist failed to start"; journalctl -u dnsdist --no-pager -n 30; exit 1; }
     if [[ -f "${CONF_DIR}/.xray_managed" ]]; then
         systemctl restart xray || { err "xray failed to start"; journalctl -u xray --no-pager -n 30; exit 1; }
     fi
@@ -1806,7 +1892,7 @@ show_status() {
     echo "=========================================="
     echo "      Proxy Gateway Status"
     echo "=========================================="
-    for svc in mosdns sniproxy 5gpn-tcp-proxy quic-proxy china-dns-race-proxy xray; do
+    for svc in dnsdist mosdns sniproxy 5gpn-tcp-proxy quic-proxy china-dns-race-proxy xray; do
         status="$(systemctl is-active "$svc" 2>/dev/null || true)"
         [[ -n "$status" ]] || status="unknown"
         if [[ "$status" == "active" ]]; then
@@ -1827,17 +1913,18 @@ show_status() {
 }
 
 do_uninstall() {
-    warn "This will remove sniproxy, 5gpn-tcp-proxy, quic-proxy, china-dns-race-proxy, mosdns configs, and rules."
+    warn "This will remove dnsdist, sniproxy, 5gpn-tcp-proxy, quic-proxy, china-dns-race-proxy, mosdns configs, and rules."
     warn "Xray binaries installed by the official installer are kept; remove Xray manually if you no longer need it."
     read -r -p "Are you sure? [y/N]: " confirm
     [[ "$confirm" =~ ^[Yy]$ ]] || { info "Uninstall cancelled"; exit 0; }
 
-    systemctl stop mosdns sniproxy 5gpn-tcp-proxy quic-proxy china-dns-race-proxy 2>/dev/null || true
-    systemctl disable mosdns sniproxy 5gpn-tcp-proxy quic-proxy china-dns-race-proxy 2>/dev/null || true
+    systemctl stop dnsdist mosdns sniproxy 5gpn-tcp-proxy quic-proxy china-dns-race-proxy 2>/dev/null || true
+    systemctl disable dnsdist mosdns sniproxy 5gpn-tcp-proxy quic-proxy china-dns-race-proxy 2>/dev/null || true
     rm -f /etc/systemd/system/{mosdns,sniproxy,5gpn-tcp-proxy,quic-proxy,china-dns-race-proxy,update-mosdns-rules}.*
+    rm -rf /etc/systemd/system/dnsdist.service.d
     systemctl daemon-reload
 
-    rm -rf "$BASE_DIR" /etc/sniproxy.conf /etc/mosdns /usr/local/bin/update-mosdns-rules.sh
+    rm -rf "$BASE_DIR" /etc/sniproxy.conf /etc/mosdns /etc/dnsdist /usr/local/bin/update-mosdns-rules.sh
     rm -f /usr/local/sbin/sniproxy
     rm -f /etc/letsencrypt/renewal-hooks/deploy/99-reload-mosdns.sh
     rm -f /etc/sysctl.d/99-proxy-gateway.conf
@@ -1890,9 +1977,15 @@ force_renew_cert() {
     fi
 
     if systemctl is-active --quiet mosdns; then
-        systemctl restart mosdns && ok "Certificate renewed and mosdns restarted"
+        systemctl restart mosdns
+        if systemctl is-active --quiet dnsdist; then
+            systemctl reload dnsdist 2>/dev/null || systemctl restart dnsdist 2>/dev/null || true
+        fi
+        ok "Certificate renewed; mosdns restarted and dnsdist reloaded"
     else
-        systemctl start mosdns && ok "Certificate renewed and mosdns started"
+        systemctl start mosdns
+        systemctl restart dnsdist 2>/dev/null || true
+        ok "Certificate renewed; mosdns started and dnsdist refreshed"
     fi
 }
 
@@ -1908,7 +2001,7 @@ main_install() {
     phase "Preflight checks"
     detect_os
     get_public_ip
-    note "Gateway role: DNS control plane on :53/:853, TCP proxy on :80/:443, QUIC proxy on UDP :443."
+    note "Gateway role: mosdns policy on :53 plus dnsdist DoT frontend on :853, TCP proxy on :80/:443, QUIC proxy on UDP :443."
 
     phase "Install system dependencies"
     install_deps
@@ -1938,6 +2031,7 @@ main_install() {
 
     phase "Render mosdns and bootstrap rule lists"
     install_mosdns
+    install_dnsdist_frontend
     init_rules
 
     phase "Apply host tuning and firewall policy"

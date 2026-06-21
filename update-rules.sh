@@ -2,11 +2,14 @@
 set -euo pipefail
 
 BASE_DIR="/etc/mosdns"
+DNSDIST_DIR="/etc/dnsdist"
 RULES_DIR="${BASE_DIR}/rules"
 SUBS_DIR="${BASE_DIR}/subscriptions"
 CUSTOM_DIR="${BASE_DIR}/rules/custom"
 CONFIG_TEMPLATE="${BASE_DIR}/config.yaml.template"
 CONFIG_FILE="${BASE_DIR}/config.yaml"
+DNSDIST_TEMPLATE="${DNSDIST_DIR}/dnsdist.conf.template"
+DNSDIST_CONFIG="${DNSDIST_DIR}/dnsdist.conf"
 GFWLIST_URL="${GFWLIST_URL:-https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt}"
 CHINALIST_URL="${CHINALIST_URL:-https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/accelerated-domains.china.conf}"
 GFWLIST_FALLBACK_URL="${GFWLIST_FALLBACK_URL:-https://cdn.jsdelivr.net/gh/gfwlist/gfwlist@master/gfwlist.txt}"
@@ -163,6 +166,31 @@ render_mosdns_client_cidrs() {
     fi
 }
 
+render_dnsdist_client_cidrs() {
+    local input="${1:-}"
+    local cidr_list=()
+    local cidr first=1
+    if [[ -z "$input" ]]; then
+        cidr_list=("${DEFAULT_NPN_CLIENT_CIDRS[@]}")
+    else
+        input="${input//,/ }"
+        read -r -a cidr_list <<< "$input"
+    fi
+    for cidr in "${cidr_list[@]}"; do
+        [[ -z "$cidr" ]] && continue
+        if [[ ! "$cidr" =~ ^[0-9A-Fa-f:.]+/[0-9]{1,3}$ ]]; then
+            warn "Skipping invalid dnsdist NPN client CIDR: $cidr"
+            continue
+        fi
+        if [[ "$first" == "0" ]]; then
+            printf ', '
+        fi
+        printf '"%s"' "$cidr"
+        first=0
+    done
+    [[ "$first" == "0" ]] || printf '"172.22.0.0/16"'
+}
+
 dns_query_log_enabled() {
     local value="${DNS_QUERY_LOG:-0}"
     [[ -f "${BASE_DIR}/.query_log" ]] && value="$(cat "${BASE_DIR}/.query_log" 2>/dev/null || echo "$value")"
@@ -307,6 +335,29 @@ PYEOF
     log "mosdns config rendered: ${CONFIG_FILE}"
 }
 
+install_dnsdist_config() {
+    [[ -f "$DNSDIST_TEMPLATE" ]] || return 0
+    local npn_client_cidrs_raw npn_client_cidrs_lua
+    npn_client_cidrs_raw=$(cat "${BASE_DIR}/.npn_client_cidrs" 2>/dev/null || echo "${DEFAULT_NPN_CLIENT_CIDRS[*]}")
+    npn_client_cidrs_lua=$(render_dnsdist_client_cidrs "$npn_client_cidrs_raw")
+    python3 - "$DNSDIST_TEMPLATE" "$npn_client_cidrs_lua" "$DNSDIST_CONFIG" <<'PYEOF'
+import sys
+src, npn_client_cidrs_lua, dst = sys.argv[1:4]
+with open(src, 'r', encoding='utf-8') as f:
+    content = f.read()
+content = content.replace('__NPN_CLIENT_CIDRS_LUA__', npn_client_cidrs_lua)
+with open(dst, 'w', encoding='utf-8') as f:
+    f.write(content)
+PYEOF
+    if command -v dnsdist >/dev/null 2>&1; then
+        dnsdist --check-config -C "$DNSDIST_CONFIG" >/dev/null 2>&1 || {
+            warn "Generated dnsdist config failed validation; keeping current frontend state"
+            return 1
+        }
+    fi
+    log "dnsdist config rendered: ${DNSDIST_CONFIG}"
+}
+
 reload_mosdns() {
     if systemctl is-active --quiet mosdns 2>/dev/null; then
         systemctl restart mosdns
@@ -314,6 +365,10 @@ reload_mosdns() {
     else
         systemctl start mosdns 2>/dev/null || true
         log "mosdns start requested"
+    fi
+    if systemctl is-active --quiet dnsdist 2>/dev/null; then
+        systemctl reload dnsdist 2>/dev/null || systemctl restart dnsdist 2>/dev/null || true
+        log "dnsdist frontend refreshed"
     fi
 }
 
@@ -342,6 +397,7 @@ main() {
     done
 
     install_config
+    install_dnsdist_config || true
     reload_mosdns
     log "Rule update completed."
 }

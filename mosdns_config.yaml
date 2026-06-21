@@ -159,12 +159,9 @@ __PUBLIC_QUERY_LOG_RULE__
         exec: reject 5
       - exec: goto private_sequence
 
-  - tag: dot_entry
+  - tag: public_dnsdist_entry
     type: sequence
     args:
-      # DoT/853 is public, but only NPN clients get proxy-spoof answers.
-      - matches: client_ip $npn_clients
-        exec: goto private_sequence
       - exec: goto public_sequence
 
   - tag: udp_server
@@ -179,10 +176,26 @@ __PUBLIC_QUERY_LOG_RULE__
       entry: plain_dns_entry
       listen: ":53"
 
-  - tag: dot_server
+  - tag: private_dnsdist_udp_server
+    type: udp_server
+    args:
+      entry: private_sequence
+      listen: "127.0.0.1:5353"
+
+  - tag: public_dnsdist_udp_server
+    type: udp_server
+    args:
+      entry: public_dnsdist_entry
+      listen: "127.0.0.1:5354"
+
+  - tag: private_dnsdist_tcp_server
     type: tcp_server
     args:
-      entry: dot_entry
-      listen: ":853"
-      cert: "/etc/mosdns/certs/fullchain.pem"
-      key: "/etc/mosdns/certs/privkey.pem"
+      entry: private_sequence
+      listen: "127.0.0.1:5353"
+
+  - tag: public_dnsdist_tcp_server
+    type: tcp_server
+    args:
+      entry: public_dnsdist_entry
+      listen: "127.0.0.1:5354"

@@ -3,6 +3,7 @@ $ErrorActionPreference = "Stop"
 $root = Split-Path -Parent (Split-Path -Parent $PSCommandPath)
 $templatePath = Join-Path $root "mosdns_config.yaml"
 $template = Get-Content -Path $templatePath -Raw -Encoding UTF8
+$dnsdistTemplate = Get-Content -Path (Join-Path $root "dnsdist.conf.template") -Raw -Encoding UTF8
 $install = Get-Content -Path (Join-Path $root "install.sh") -Raw -Encoding UTF8
 $rules = Get-Content -Path (Join-Path $root "update-rules.sh") -Raw -Encoding UTF8
 
@@ -38,10 +39,33 @@ if (-not $install.Contains('127.0.0.1/32')) {
 if (-not $rules.Contains('.npn_client_cidrs')) {
     throw "update-rules.sh must preserve saved NPN client CIDRs"
 }
+if (-not $install.Contains('"dnsdist.conf.template"')) {
+    throw "remote installer must download dnsdist.conf.template"
+}
+if (-not $install.Contains('install_dnsdist_frontend()')) {
+    throw "install.sh must configure dnsdist as the DoT frontend"
+}
+if (-not $install.Contains('systemctl restart dnsdist')) {
+    throw "install.sh must start dnsdist frontend"
+}
 Assert-Contains 'tag: plain_dns_entry' 'separate plain DNS entry'
 Assert-Contains '"!client_ip $npn_clients"' 'non-NPN DNS/53 rejection'
-Assert-Contains 'tag: dot_entry' 'separate DoT entry'
-Assert-Contains 'client_ip $npn_clients' 'DoT source-aware split'
+Assert-Contains 'tag: private_dnsdist_udp_server' 'private dnsdist UDP backend'
+Assert-Contains 'tag: public_dnsdist_udp_server' 'public dnsdist UDP backend'
+Assert-Contains 'listen: "127.0.0.1:5353"' 'private dnsdist backend port'
+Assert-Contains 'listen: "127.0.0.1:5354"' 'public dnsdist backend port'
+if (-not $dnsdistTemplate.Contains('addTLSLocal("0.0.0.0:853"')) {
+    throw "dnsdist must terminate Android Private DNS on TCP/853"
+}
+if (-not $dnsdistTemplate.Contains('sessionTickets=true')) {
+    throw "dnsdist DoT frontend must enable TLS session tickets"
+}
+if (-not $dnsdistTemplate.Contains('newServer({address="127.0.0.1:5353"') -or -not $dnsdistTemplate.Contains('newServer({address="127.0.0.1:5354"')) {
+    throw "dnsdist must forward to local mosdns private/public backends"
+}
+if (-not $dnsdistTemplate.Contains('privateClientRule = makeRule({__NPN_CLIENT_CIDRS_LUA__})')) {
+    throw "dnsdist must split DoT clients by rendered NPN CIDRs"
+}
 Assert-Contains 'black_hole __SERVER_IP__' 'private-client proxy spoof'
 if (-not $template.Contains('Default for private clients: any remaining A query is treated as proxy')) {
     throw "mosdns private sequence must default remaining A queries to the VPS proxy"
@@ -56,6 +80,8 @@ Assert-Contains '__PUBLIC_QUERY_LOG_RULE__' 'public query log placeholder'
 Assert-Contains 'udp://127.0.0.1:5301' 'ChinaList uses local race proxy'
 Assert-Contains 'qtype 28' 'AAAA IPv4-only handling'
 Assert-Contains 'HTTP/3 or ECH' 'HTTPS/SVCB disables HTTP3/ECH bootstrap hints'
-Assert-Contains 'cert: "/etc/mosdns/certs/fullchain.pem"' 'DoT certificate path'
+if ($template.Contains('listen: ":853"') -or $template.Contains('cert: "/etc/mosdns/certs/fullchain.pem"')) {
+    throw "mosdns must not bind the public DoT port when dnsdist is the frontend"
+}
 
 Write-Output "mosdns policy markers OK"

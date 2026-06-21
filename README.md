@@ -1,13 +1,14 @@
 # 5GPN 5G 专网智能 DNS 与 SNI 透明反代网关
 
-5GPN 面向 5G NPN / N6 互通场景，在 VPS 或边缘服务器上部署一套轻量出口网关：mosdns 负责 DNS/DoT 分流，sniproxy 或 5gpn-tcp-proxy 负责 TCP 80/443 的 SNI/Host 透明反代，quic-proxy 补齐 UDP 443 的 QUIC/HTTP3 场景，china-dns-race-proxy 负责国内域名解析竞速与 fallback。
+5GPN 面向 5G NPN / N6 互通场景，在 VPS 或边缘服务器上部署一套轻量出口网关：dnsdist 负责 Android Private DNS / DoT 853 前端，mosdns 负责 DNS 分流策略，sniproxy 或 5gpn-tcp-proxy 负责 TCP 80/443 的 SNI/Host 透明反代，quic-proxy 补齐 UDP 443 的 QUIC/HTTP3 场景，china-dns-race-proxy 负责国内域名解析竞速与 fallback。
 
 ## 架构概览
 
 ```text
 UE / 终端
   -> 5G 专网 / N6
-  -> mosdns :53/:853
+  -> dnsdist :853 -> mosdns 127.0.0.1:5353/5354
+  -> mosdns :53
       -> proxy 域名: 返回 VPS IP -> sniproxy 或 5gpn-tcp-proxy / quic-proxy
       -> china 域名: 127.0.0.1:5301 -> china-dns-race-proxy
       -> direct/默认: 海外 DNS 池
@@ -29,7 +30,8 @@ UE / 终端
 
 | 组件 | 协议/端口 | 作用 |
 |------|-----------|------|
-| mosdns | TCP/UDP 53, TCP 853 | 智能 DNS 分流与 DoT 服务 |
+| dnsdist | TCP 853 | Android Private DNS / DoT TLS 前端 |
+| mosdns | TCP/UDP 53, TCP/UDP 127.0.0.1:5353/5354 | 智能 DNS 分流策略 |
 | sniproxy | TCP 80/443 | 默认 direct 模式 HTTP/HTTPS SNI/Host 透明反代 |
 | 5gpn-tcp-proxy | TCP 80/443 | 可选 SOCKS5 出口模式 HTTP/HTTPS SNI/Host 透明反代 |
 | quic-proxy | UDP 443 | QUIC/HTTP3 SNI 透明反代 |
@@ -72,7 +74,7 @@ chmod +x install.sh
 ./install.sh
 ```
 
-安装过程会完成：依赖安装、自有域名校验、Let's Encrypt 证书申请、mosdns/sniproxy/quic-proxy/china-dns-race-proxy 安装、规则初始化、nftables 防火墙、系统网络优化、定时续期和规则更新。
+安装过程会完成：依赖安装、自有域名校验、Let's Encrypt 证书申请、dnsdist/mosdns/sniproxy/quic-proxy/china-dns-race-proxy 安装、规则初始化、nftables 防火墙、系统网络优化、定时续期和规则更新。
 
 ## 域名准备
 
@@ -238,7 +240,7 @@ SOCKS5 egress 会同时覆盖 TCP 80/443 和 UDP/443 QUIC。Xray/sing-box 的 SO
 
 ### mosdns 分流
 
-mosdns 使用不同入口区分普通 DNS 与 DoT：普通 DNS 53 对非专网来源拒绝，DoT 853 对公网开放但不向公网来源返回代理 IP。专网客户端中，china/ChinaList 真实解析，direct 为人工真实解析例外，其余 A 记录默认返回 VPS IP。
+dnsdist 监听公网 TCP 853 并终止 DoT/TLS，然后按来源 CIDR 转发到 mosdns 的本地 private/public 后端。mosdns 使用不同入口区分普通 DNS 与 DoT 前端流量：普通 DNS 53 对非专网来源拒绝，dnsdist 的 DoT 853 对公网开放但不向公网来源返回代理 IP。专网客户端中，china/ChinaList 真实解析，direct 为人工真实解析例外，其余 A 记录默认返回 VPS IP。
 
 ### 国内解析
 
@@ -270,12 +272,14 @@ ip saddr 172.22.0.0/16 udp dport 443 accept
 
 ```bash
 # 服务状态
+systemctl status dnsdist
 systemctl status mosdns
 systemctl status sniproxy
 systemctl status quic-proxy
 systemctl status china-dns-race-proxy
 
 # 实时日志
+journalctl -u dnsdist -f
 journalctl -u mosdns -f
 journalctl -u sniproxy -f
 journalctl -u quic-proxy -f
