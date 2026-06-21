@@ -55,6 +55,7 @@ Assert-Contains '__PRIVATE_QUERY_LOG_RULE__' 'private query log placeholder'
 Assert-Contains '__PUBLIC_QUERY_LOG_RULE__' 'public query log placeholder'
 Assert-Contains 'udp://127.0.0.1:5301' 'ChinaList uses local race proxy'
 Assert-Contains 'qtype 28' 'AAAA IPv4-only handling'
+Assert-Contains 'HTTP/3 or ECH' 'HTTPS/SVCB disables HTTP3/ECH bootstrap hints'
 Assert-Contains 'cert: "/etc/mosdns/certs/fullchain.pem"' 'DoT certificate path'
 
 Write-Output "mosdns policy markers OK"

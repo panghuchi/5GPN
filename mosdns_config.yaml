@@ -88,7 +88,8 @@ __PUBLIC_OVERSEAS_UPSTREAMS__
       # IPv4-only gateway: return NODATA for all AAAA queries.
       - matches: qtype 28
         exec: reject 0
-      # Reject HTTPS/SVCB to reduce client attempts to force alternative paths.
+      # Reject HTTPS/SVCB (qtype 65) so clients do not learn HTTP/3 or ECH
+      # bootstrap hints that may bypass the TCP SNI/Host proxy path.
       - matches: qtype 65
         exec: reject 3
       - matches: qname $reject_domains
