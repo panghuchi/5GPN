@@ -33,6 +33,13 @@ var (
 	debugLog        = flag.Bool("debug", false, "Enable verbose logging")
 )
 
+var tcpCopyBufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 32*1024)
+		return &buf
+	},
+}
+
 func main() {
 	flag.Parse()
 	mode := strings.ToLower(strings.TrimSpace(*egressMode))
@@ -99,7 +106,9 @@ func handleClient(client net.Conn, proto, mode string) {
 		}
 	}
 
-	log.Printf("[%s] %s %s via %s", client.RemoteAddr(), proto, target, mode)
+	if *debugLog {
+		log.Printf("[%s] %s %s via %s", client.RemoteAddr(), proto, target, mode)
+	}
 	relay(client, upstream)
 }
 
@@ -411,7 +420,9 @@ func relay(a, b net.Conn) {
 
 func copyAndClose(wg *sync.WaitGroup, dst, src net.Conn) {
 	defer wg.Done()
-	_, _ = io.Copy(dst, src)
+	bufp := tcpCopyBufferPool.Get().(*[]byte)
+	defer tcpCopyBufferPool.Put(bufp)
+	_, _ = io.CopyBuffer(dst, src, *bufp)
 	if tcp, ok := dst.(*net.TCPConn); ok {
 		_ = tcp.CloseWrite()
 	}

@@ -45,12 +45,20 @@ var (
 	socks5Pass  = flag.String("socks5-pass", "", "SOCKS5 password")
 )
 
+var socks5UDPBufferPool = sync.Pool{
+	New: func() any {
+		buf := make([]byte, 0, 65535+300)
+		return &buf
+	},
+}
+
 type Session struct {
 	clientAddr   *net.UDPAddr
 	backendConn  *net.UDPConn
 	socksControl net.Conn
 	targetHost   string
 	targetPort   int
+	socksUDPHead []byte
 	egress       string
 	lastActivity time.Time
 	mu           sync.Mutex
@@ -99,10 +107,21 @@ func main() {
 			}
 			continue
 		}
+		if mgr.hasSession(clientAddr.String()) {
+			mgr.handlePacket(buf[:n], clientAddr)
+			continue
+		}
 		data := make([]byte, n)
 		copy(data, buf[:n])
 		go mgr.handlePacket(data, clientAddr)
 	}
+}
+
+func (m *SessionManager) hasSession(key string) bool {
+	m.mu.RLock()
+	_, ok := m.sessions[key]
+	m.mu.RUnlock()
+	return ok
 }
 
 func (m *SessionManager) handlePacket(data []byte, clientAddr *net.UDPAddr) {
@@ -117,14 +136,18 @@ func (m *SessionManager) handlePacket(data []byte, clientAddr *net.UDPAddr) {
 		sess.lastActivity = time.Now()
 		bc := sess.backendConn
 		payload := data
+		var pooled *[]byte
 		if sess.egress == "socks5" {
-			payload = wrapSOCKS5UDP(sess.targetHost, sess.targetPort, data)
+			payload, pooled = wrapSOCKS5UDPWithHeader(sess.socksUDPHead, data)
 		}
 		sess.mu.Unlock()
 		if bc != nil {
 			if _, err := bc.Write(payload); err != nil {
 				log.Printf("[%s] Write to backend error: %v", key, err)
 			}
+		}
+		if pooled != nil {
+			releaseSOCKS5UDPBuffer(pooled)
 		}
 		return
 	}
@@ -167,18 +190,28 @@ func (m *SessionManager) handlePacket(data []byte, clientAddr *net.UDPAddr) {
 		egress:       strings.ToLower(strings.TrimSpace(*egressMode)),
 		lastActivity: time.Now(),
 	}
+	if sess.egress == "socks5" {
+		sess.socksUDPHead = buildSOCKS5UDPHeader(sess.targetHost, sess.targetPort)
+	}
 	m.mu.Lock()
 	m.sessions[key] = sess
 	m.mu.Unlock()
 
 	firstPayload := data
+	var firstPooled *[]byte
 	if sess.egress == "socks5" {
-		firstPayload = wrapSOCKS5UDP(sess.targetHost, sess.targetPort, data)
+		firstPayload, firstPooled = wrapSOCKS5UDPWithHeader(sess.socksUDPHead, data)
 	}
 	if _, err := bc.Write(firstPayload); err != nil {
+		if firstPooled != nil {
+			releaseSOCKS5UDPBuffer(firstPooled)
+		}
 		log.Printf("[%s] First packet forward error: %v", key, err)
 		m.removeSession(key)
 		return
+	}
+	if firstPooled != nil {
+		releaseSOCKS5UDPBuffer(firstPooled)
 	}
 
 	go m.relayBackendToClient(sess, key)
@@ -352,6 +385,14 @@ func readSOCKS5Address(reader io.Reader, atyp byte) (string, error) {
 }
 
 func wrapSOCKS5UDP(host string, port int, payload []byte) []byte {
+	head := buildSOCKS5UDPHeader(host, port)
+	out := make([]byte, 0, len(head)+len(payload))
+	out = append(out, head...)
+	out = append(out, payload...)
+	return out
+}
+
+func buildSOCKS5UDPHeader(host string, port int) []byte {
 	out := []byte{0x00, 0x00, 0x00}
 	if ip := net.ParseIP(host); ip != nil {
 		if ip4 := ip.To4(); ip4 != nil {
@@ -369,8 +410,29 @@ func wrapSOCKS5UDP(host string, port int, payload []byte) []byte {
 		out = append(out, []byte(host)...)
 	}
 	out = binary.BigEndian.AppendUint16(out, uint16(port))
-	out = append(out, payload...)
 	return out
+}
+
+func wrapSOCKS5UDPWithHeader(header, payload []byte) ([]byte, *[]byte) {
+	bufp := socks5UDPBufferPool.Get().(*[]byte)
+	buf := (*bufp)[:0]
+	if cap(buf) < len(header)+len(payload) {
+		buf = make([]byte, 0, len(header)+len(payload))
+	}
+	buf = append(buf, header...)
+	buf = append(buf, payload...)
+	*bufp = buf
+	return buf, bufp
+}
+
+func releaseSOCKS5UDPBuffer(bufp *[]byte) {
+	buf := *bufp
+	if cap(buf) > 128*1024 {
+		return
+	}
+	buf = buf[:0]
+	*bufp = buf
+	socks5UDPBufferPool.Put(bufp)
 }
 
 func unwrapSOCKS5UDP(packet []byte) ([]byte, error) {

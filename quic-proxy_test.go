@@ -54,3 +54,22 @@ func TestExtractSNIDoesNotMutateInitialPacket(t *testing.T) {
 		t.Fatalf("extractSNI mutated the packet")
 	}
 }
+
+func TestSOCKS5UDPHeaderMatchesWrappedPacket(t *testing.T) {
+	payload := []byte("hello")
+	header := buildSOCKS5UDPHeader("example.com", 443)
+	pooledPayload, pooled := wrapSOCKS5UDPWithHeader(header, payload)
+	defer releaseSOCKS5UDPBuffer(pooled)
+
+	wrapped := wrapSOCKS5UDP("example.com", 443, payload)
+	if !bytes.Equal(pooledPayload, wrapped) {
+		t.Fatalf("pooled SOCKS5 UDP packet = %x, want %x", pooledPayload, wrapped)
+	}
+	unwrapped, err := unwrapSOCKS5UDP(pooledPayload)
+	if err != nil {
+		t.Fatalf("unwrapSOCKS5UDP returned error: %v", err)
+	}
+	if !bytes.Equal(unwrapped, payload) {
+		t.Fatalf("unwrapSOCKS5UDP returned %q, want %q", unwrapped, payload)
+	}
+}
