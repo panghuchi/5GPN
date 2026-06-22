@@ -1,6 +1,8 @@
 # 5GPN 5G 专网智能 DNS 与 SNI 透明反代网关
 
-5GPN 面向 5G NPN / N6 互通场景，在 VPS 或边缘服务器上部署一套轻量出口网关：dnsdist 负责 Android Private DNS / DoT 853 前端，mosdns 负责 DNS 分流策略，sniproxy 或 5gpn-tcp-proxy 负责 TCP 80/443 的 SNI/Host 透明反代，quic-proxy 补齐 UDP 443 的 QUIC/HTTP3 场景，china-dns-race-proxy 负责国内域名解析竞速与 fallback。
+[中文](README.md) | [English](README.en.md)
+
+5GPN 面向 5G NPN / N6 互通场景，在 VPS 或边缘服务器上部署一套轻量出口网关：dnsdist 负责 Android Private DNS / DoT 853 前端，mosdns 负责 DNS 分流策略，sniproxy 或 5gpn-tcp-proxy 负责 TCP 80/443 的 SNI/Host 透明反代，quic-proxy 补齐 UDP 443 的 QUIC/HTTP3 场景，china-dns-race-proxy 负责国内域名解析竞速与备用回退。
 
 ## 架构概览
 
@@ -35,8 +37,8 @@ UE / 终端
 | sniproxy | TCP 80/443 | 默认 direct 模式 HTTP/HTTPS SNI/Host 透明反代 |
 | 5gpn-tcp-proxy | TCP 80/443 | 可选 SOCKS5 出口模式 HTTP/HTTPS SNI/Host 透明反代 |
 | quic-proxy | UDP 443 | QUIC/HTTP3 SNI 透明反代 |
-| china-dns-race-proxy | TCP/UDP 127.0.0.1:5301 | 国内 DNS 并发竞速、TCP 重试、海外 fallback |
-| Certbot | - | Let's Encrypt 证书申请与续期 |
+| china-dns-race-proxy | TCP/UDP 127.0.0.1:5301 | 国内 DNS 并发竞速、TCP 重试、海外备用解析 |
+| Certbot | - | 自动申请和续期 Let's Encrypt 证书 |
 
 ## 访问策略
 
@@ -113,7 +115,7 @@ export NPN_CLIENT_CIDRS="172.22.0.0/16"
 - `NPN_CLIENT_CIDRS`：会被 mosdns 识别为专网客户端的 DNS 来源 CIDR，默认 `172.22.0.0/16`；如果 DoT 查询实际来自其它专网/NAT 段，可以追加，例如 `172.22.0.0/16,100.64.0.0/10`。
 - `PRIVATE_OVERSEAS_DNS`：`172.22.0.0/16` 专网客户端默认海外解析。
 - `PUBLIC_OVERSEAS_DNS`：非专网 DoT 客户端默认海外解析。
-- `SNIPROXY_DNS`：sniproxy 后端解析 resolver，默认跟随 `PRIVATE_OVERSEAS_DNS`。
+- `SNIPROXY_DNS`：sniproxy 后端域名解析上游，默认跟随 `PRIVATE_OVERSEAS_DNS`。
 - `EGRESS_MODE`：proxy 出口模式，`direct` 使用 sniproxy/quic-proxy 直连，`socks5` 使用 5gpn-tcp-proxy/quic-proxy 走 SOCKS5。
 - `EGRESS_SOCKS5_ADDR`：`EGRESS_MODE=socks5` 时的本机 SOCKS5 出口，默认 `127.0.0.1:1080`。
 - `OVERSEAS_DNS`：兼容旧参数，等同于 `PRIVATE_OVERSEAS_DNS`。
@@ -155,9 +157,9 @@ export NPN_CLIENT_CIDRS="172.22.0.0/16"
 ./install.sh --uninstall       # 卸载组件与配置
 ```
 
-## DNS Query Diagnostics
+## DNS 查询诊断
 
-Per-query DNS logs are disabled by default to avoid noisy journals. Enable them only while troubleshooting split routing:
+为避免日志过于冗长，逐条 DNS 查询日志默认关闭。只有排查分流问题时才建议临时开启：
 
 ```bash
 echo 1 > /etc/mosdns/.query_log
@@ -165,7 +167,7 @@ RULE_DOWNLOAD_TOOL=wget /usr/local/bin/update-mosdns-rules.sh
 journalctl -u mosdns -f
 ```
 
-`5gpn-private` means the 5G private-network/local diagnostic entry. `5gpn-public` means the public DoT entry. The mosdns summary includes the query name, type, and response records. Disable it after debugging:
+`5gpn-private` 表示 5G 专网或本机诊断入口，`5gpn-public` 表示公网 DoT 入口。mosdns 摘要会记录查询域名、查询类型和返回记录。排查结束后建议关闭：
 
 如果国外域名故障时日志显示 `5gpn-public`，说明该 DNS 查询没有命中 `NPN_CLIENT_CIDRS`，mosdns 会返回真实公网解析而不是 VPS IP，VPS 443 就不会收到连接。此时先抓 DNS 来源地址，再把对应 CIDR 写入：
 
@@ -180,7 +182,7 @@ echo 0 > /etc/mosdns/.query_log
 RULE_DOWNLOAD_TOOL=wget /usr/local/bin/update-mosdns-rules.sh
 ```
 
-## SOCKS5 Egress
+## SOCKS5 出口
 
 交互安装时脚本会询问 proxy 出站模式：
 
@@ -195,7 +197,7 @@ export EGRESS_SOCKS5_ADDR="127.0.0.1:1080"
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/panghuchi/5GPN/main/install.sh)"
 ```
 
-如果选择由安装脚本同时安装 Xray，脚本会使用官方安装器安装 Xray，并写入 `/usr/local/etc/xray/config.json`。Xray inbound 会监听前面填写的 SOCKS5 地址，outbound 会按交互输入的 SS2022 参数生成：
+如果选择由安装脚本同时安装 Xray，脚本会使用官方安装器安装 Xray，并写入 `/usr/local/etc/xray/config.json`。Xray 入站会监听前面填写的 SOCKS5 地址，出站会按交互输入的 SS2022 参数生成：
 
 ```bash
 export EGRESS_MODE=socks5
@@ -238,7 +240,7 @@ systemctl restart 5gpn-tcp-proxy
 systemctl stop sniproxy
 ```
 
-SOCKS5 egress 会同时覆盖 TCP 80/443 和 UDP/443 QUIC。Xray/sing-box 的 SOCKS5 入站需要开启 UDP 支持，否则 QUIC 会失败或回退到 TCP。
+SOCKS5 出口会同时覆盖 TCP 80/443 和 UDP/443 QUIC。Xray/sing-box 的 SOCKS5 入站需要开启 UDP 支持，否则 QUIC 会失败或回退到 TCP。
 
 ## 关键文件
 
@@ -247,9 +249,9 @@ SOCKS5 egress 会同时覆盖 TCP 80/443 和 UDP/443 QUIC。Xray/sing-box 的 SO
 | `install.sh` | 主安装脚本 |
 | `mosdns_config.yaml` | mosdns 配置模板 |
 | `update-rules.sh` | 规则更新与订阅合并脚本 |
-| `renew-hook.sh` | 证书续期 Hook |
+| `renew-hook.sh` | 证书续期钩子 |
 | `sniproxy.conf` | sniproxy 配置模板 |
-| `5gpn-tcp-proxy.go` | 支持 direct/SOCKS5 出口的 TCP Host/SNI 代理源码 |
+| `5gpn-tcp-proxy.go` | 支持 `direct`/SOCKS5 出口的 TCP Host/SNI 代理源码 |
 | `quic-proxy.go` | QUIC SNI 代理源码 |
 | `china-dns-race-proxy.go` | 国内 DNS 竞速代理源码 |
 
@@ -257,11 +259,11 @@ SOCKS5 egress 会同时覆盖 TCP 80/443 和 UDP/443 QUIC。Xray/sing-box 的 SO
 
 ### mosdns 分流
 
-dnsdist 监听公网 TCP 853 并终止 DoT/TLS，然后按来源 CIDR 转发到 mosdns 的本地 private/public 后端。mosdns 使用不同入口区分普通 DNS 与 DoT 前端流量：普通 DNS 53 对非专网来源拒绝，dnsdist 的 DoT 853 对公网开放但不向公网来源返回代理 IP。专网客户端中，china/ChinaList 真实解析，direct 为人工真实解析例外，其余 A 记录默认返回 VPS IP。
+dnsdist 监听公网 TCP 853 并终止 DoT/TLS，然后按来源 CIDR 转发到 mosdns 的本地专网/公网后端。mosdns 使用不同入口区分普通 DNS 与 DoT 前端流量：普通 DNS 53 对非专网来源拒绝，dnsdist 的 DoT 853 对公网开放但不向公网来源返回代理 IP。专网客户端中，china/ChinaList 真实解析，direct 为人工真实解析例外，其余 A 记录默认返回 VPS IP。
 
 ### 国内解析
 
-ChinaList 和自定义 china 域名会转发到 `127.0.0.1:5301`。`china-dns-race-proxy` 默认使用 `223.5.5.5`、`223.6.6.6` 并发查询，`150ms` 后启动国内 TCP 53 重试，`750ms` 后才启用海外 fallback，避免国内 DNS 单点超时拖慢访问。国内查询默认注入 EDNS Client Subnet `139.226.48.0/24`，用于让国内 CDN 返回更接近中国网络的地址；可在 `/opt/proxy-gateway/etc/china-dns-race-proxy.env` 中覆盖：
+ChinaList 和自定义 china 域名会转发到 `127.0.0.1:5301`。`china-dns-race-proxy` 默认使用 `223.5.5.5`、`223.6.6.6` 并发查询，`150ms` 后启动国内 TCP 53 重试，`750ms` 后才启用海外备用解析，避免国内 DNS 单点超时拖慢访问。国内查询默认注入 EDNS Client Subnet `139.226.48.0/24`，用于让国内 CDN 返回更接近中国网络的地址；可在 `/opt/proxy-gateway/etc/china-dns-race-proxy.env` 中覆盖：
 
 ```bash
 CHINA_DNS_UPSTREAMS=223.5.5.5:53,223.6.6.6:53
@@ -270,7 +272,7 @@ CHINA_DNS_ECS=139.226.48.0/24
 
 ### TCP 代理
 
-sniproxy 从源码编译安装到 `/usr/local/sbin/sniproxy`，避免发行版包路径和编译选项差异导致启动失败。安装脚本会生成 `/etc/sniproxy.conf`，并写入 `SNIPROXY_DNS` 对应 resolver，同时强制 `mode ipv4_only`。它不解密 TLS，只按 SNI/Host 转发。
+sniproxy 从源码编译安装到 `/usr/local/sbin/sniproxy`，避免发行版包路径和编译选项差异导致启动失败。安装脚本会生成 `/etc/sniproxy.conf`，并写入 `SNIPROXY_DNS` 对应解析上游，同时强制 `mode ipv4_only`。它不解密 TLS，只按 SNI/Host 转发。
 
 ### QUIC/HTTP3 代理
 
