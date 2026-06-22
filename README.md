@@ -216,11 +216,14 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/panghuchi/5GPN/main/inst
 ./install.sh --add-exit
 ./install.sh --list-exits
 ./install.sh --set-exit hk
+./install.sh --delete-exit jp
 ```
 
 `--add-exit` 默认交互输入出口名、服务器地址、端口、加密方法和密码；非交互时也可以传入 `NAME ADDRESS PORT METHOD PASSWORD` 五个参数。
 
 `--set-exit` 会把 proxy 出口切到本机 Xray SOCKS5，重写当前出口对应的 `/usr/local/etc/xray/config.json`，并重启 Xray、`5gpn-tcp-proxy` 和 `quic-proxy`。
+
+`--delete-exit` 只删除未启用的出口；当前正在使用的出口需要先切换到其它出口后再删除。
 
 也可以安装后修改：
 

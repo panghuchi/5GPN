@@ -769,6 +769,27 @@ set_exit_command() {
     activate_exit "$name" "yes"
 }
 
+delete_exit_command() {
+    check_root
+    local name="${1:-${EXIT_NAME:-}}" path current=""
+    if [[ -z "$name" && -t 0 ]]; then
+        name="$(prompt_required "Exit name to delete: ")"
+    fi
+    [[ -n "$name" ]] || { err "Usage: $0 --delete-exit NAME"; exit 1; }
+    validate_exit_name "$name" || { err "Invalid exit name: ${name}"; exit 1; }
+    path="$(exit_config_path "$name")"
+    [[ -f "$path" ]] || { err "Exit not found: ${name}"; exit 1; }
+
+    [[ -f "${CONF_DIR}/.current_exit" ]] && current="$(cat "${CONF_DIR}/.current_exit" 2>/dev/null || true)"
+    if [[ "$current" == "$name" ]]; then
+        err "Cannot delete active exit: ${name}. Switch to another exit first."
+        exit 1
+    fi
+
+    rm -f "$path"
+    ok "SS2022 exit deleted: ${name}"
+}
+
 xray_installed() {
     command -v xray >/dev/null 2>&1 && return 0
     [[ -x /usr/local/bin/xray ]] && return 0
@@ -780,6 +801,7 @@ xray_installed() {
 install_xray_if_requested() {
     [[ "$XRAY_INSTALL" == "yes" ]] || return 0
 
+    local installed_by_5gpn=0
     if xray_installed; then
         info "Existing Xray installation detected; skipping official installer."
     else
@@ -790,11 +812,15 @@ install_xray_if_requested() {
         chmod +x "$installer"
         run_quiet "Running Xray official installer..." bash "$installer" install
         rm -f "$installer"
+        installed_by_5gpn=1
     fi
 
     render_xray_config
     mkdir -p "$CONF_DIR"
     touch "${CONF_DIR}/.xray_managed"
+    if [[ "$installed_by_5gpn" == "1" ]]; then
+        touch "${CONF_DIR}/.xray_installed_by_5gpn"
+    fi
     systemctl enable xray
     systemctl restart xray || { err "xray failed to start"; journalctl -u xray --no-pager -n 30; exit 1; }
     ok "Xray ready and configured: ${EGRESS_SOCKS5_ADDR} -> ${SS2022_ADDRESS}:${SS2022_PORT}"
@@ -882,6 +908,8 @@ Options:
   --list-exits   List configured SS2022 exits
   --set-exit NAME
                  Activate one saved SS2022 exit and restart egress services
+  --delete-exit NAME
+                 Delete one saved SS2022 exit; active exit cannot be deleted
   --uninstall    Remove all installed components
   -h, --help     Show this help
 
@@ -2154,25 +2182,88 @@ show_status() {
 }
 
 do_uninstall() {
-    warn "This will remove dnsdist, sniproxy, 5gpn-tcp-proxy, quic-proxy, china-dns-race-proxy, mosdns configs, and rules."
-    warn "Xray binaries installed by the official installer are kept; remove Xray manually if you no longer need it."
+    warn "This will stop 5GPN services and remove files installed by this script."
+    warn "System packages and Let's Encrypt account/certificate archives are kept."
+    warn "If Xray existed before 5GPN, only the 5GPN-rendered Xray config is removed."
     read -r -p "Are you sure? [y/N]: " confirm
     [[ "$confirm" =~ ^[Yy]$ ]] || { info "Uninstall cancelled"; exit 0; }
 
+    local managed_xray=0 xray_installed_by_5gpn=0
+    [[ -f "${CONF_DIR}/.xray_managed" ]] && managed_xray=1
+    [[ -f "${CONF_DIR}/.xray_installed_by_5gpn" ]] && xray_installed_by_5gpn=1
+
+    info "Stopping and disabling services..."
+    systemctl stop update-mosdns-rules.timer update-mosdns-rules.service 2>/dev/null || true
+    systemctl disable update-mosdns-rules.timer update-mosdns-rules.service 2>/dev/null || true
     systemctl stop dnsdist mosdns sniproxy 5gpn-tcp-proxy quic-proxy china-dns-race-proxy 2>/dev/null || true
     systemctl disable dnsdist mosdns sniproxy 5gpn-tcp-proxy quic-proxy china-dns-race-proxy 2>/dev/null || true
-    rm -f /etc/systemd/system/{mosdns,sniproxy,5gpn-tcp-proxy,quic-proxy,china-dns-race-proxy,update-mosdns-rules}.*
+    if [[ "$managed_xray" == "1" ]]; then
+        systemctl stop xray 2>/dev/null || true
+        systemctl disable xray 2>/dev/null || true
+    fi
+    systemctl stop disable-transparent-huge-pages.service 2>/dev/null || true
+    systemctl disable disable-transparent-huge-pages.service 2>/dev/null || true
+
+    info "Removing systemd units and drop-ins..."
+    rm -f /etc/systemd/system/mosdns.service
+    rm -f /etc/systemd/system/sniproxy.service
+    rm -f /etc/systemd/system/5gpn-tcp-proxy.service
+    rm -f /etc/systemd/system/quic-proxy.service
+    rm -f /etc/systemd/system/china-dns-race-proxy.service
+    rm -f /etc/systemd/system/update-mosdns-rules.service
+    rm -f /etc/systemd/system/update-mosdns-rules.timer
+    rm -f /etc/systemd/system/disable-transparent-huge-pages.service
     rm -rf /etc/systemd/system/dnsdist.service.d
     systemctl daemon-reload
+    systemctl reset-failed dnsdist mosdns sniproxy 5gpn-tcp-proxy quic-proxy china-dns-race-proxy update-mosdns-rules.service update-mosdns-rules.timer disable-transparent-huge-pages.service 2>/dev/null || true
 
-    rm -rf "$BASE_DIR" /etc/sniproxy.conf /etc/mosdns /etc/dnsdist /usr/local/bin/update-mosdns-rules.sh
+    info "Removing 5GPN files..."
+    rm -rf "$BASE_DIR"
+    rm -rf /etc/mosdns /etc/dnsdist
+    rm -f /etc/sniproxy.conf
+    rm -f /usr/local/bin/update-mosdns-rules.sh
+    rm -f /usr/local/bin/proxy-gateway-open-cert-http.sh
+    rm -f /usr/local/bin/proxy-gateway-restore-firewall.sh
     rm -f /usr/local/sbin/sniproxy
+    rm -f /usr/local/bin/mosdns
     rm -f /etc/letsencrypt/renewal-hooks/deploy/99-reload-mosdns.sh
+    rm -f /etc/letsencrypt/renewal-hooks/pre/10-proxy-gateway-open-http.sh
+    rm -f /etc/letsencrypt/renewal-hooks/post/90-proxy-gateway-restore-firewall.sh
     rm -f /etc/sysctl.d/99-proxy-gateway.conf
+    rm -f /etc/modules-load.d/proxy-gateway-net.conf
     rm -f /etc/profile.d/go.sh
+    rm -f /etc/systemd/journald.conf.d/99-proxy-gateway.conf
+    rm -f /etc/ssh/sshd_config.d/99-5gpn-port.conf
+    rm -f /etc/nftables.conf
+    if [[ "$managed_xray" == "1" ]]; then
+        rm -f /usr/local/etc/xray/config.json
+    fi
+    if [[ "$xray_installed_by_5gpn" == "1" ]]; then
+        rm -f /etc/systemd/system/xray.service /lib/systemd/system/xray.service
+        rm -f /usr/local/bin/xray
+        rm -rf /usr/local/share/xray /usr/local/etc/xray /var/log/xray
+    fi
+    if [[ -f /etc/security/limits.conf ]]; then
+        sed -i '/# proxy-gateway-limits/,+4d' /etc/security/limits.conf 2>/dev/null || true
+    fi
 
-    # Optionally remove certbot certs
-    warn "SSL certificates in /etc/letsencrypt/live/ are kept. Remove manually if needed."
+    info "Reloading affected system configuration..."
+    sysctl --system >/dev/null 2>&1 || true
+    systemctl restart systemd-journald 2>/dev/null || true
+    if command -v nft >/dev/null 2>&1; then
+        nft flush ruleset 2>/dev/null || true
+    fi
+    if command -v sshd >/dev/null 2>&1; then
+        sshd -t 2>/dev/null || warn "SSH configuration should be checked manually."
+    fi
+    if systemctl list-unit-files sshd.service >/dev/null 2>&1; then
+        systemctl restart sshd 2>/dev/null || true
+    elif systemctl list-unit-files ssh.service >/dev/null 2>&1; then
+        systemctl restart ssh 2>/dev/null || true
+    fi
+
+    warn "Let's Encrypt certificates in /etc/letsencrypt are kept. Remove manually if no longer needed."
+    warn "System packages installed as dependencies are kept."
 
     ok "Uninstall completed"
 }
@@ -2325,7 +2416,7 @@ case "${1:-}" in
     --renew-cert)
         force_renew_cert
         ;;
-    --add-exit)
+    --add-exit|--add-exits)
         shift
         add_exit_command "$@"
         ;;
@@ -2335,6 +2426,10 @@ case "${1:-}" in
     --set-exit)
         shift
         set_exit_command "$@"
+        ;;
+    --delete-exit|--del-exit|--remove-exit)
+        shift
+        delete_exit_command "$@"
         ;;
     --uninstall)
         do_uninstall
