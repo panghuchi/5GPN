@@ -208,6 +208,20 @@ export SS2022_PASSWORD="your-password"
 bash -c "$(curl -fsSL https://raw.githubusercontent.com/panghuchi/5GPN/main/install.sh)"
 ```
 
+### SS2022 出口管理
+
+安装后可以保存多个 SS2022 出口，并按需切换。出口库存保存在 `/opt/proxy-gateway/etc/exits/*.json`，当前出口保存在 `/opt/proxy-gateway/etc/.current_exit`；Xray 配置文件只渲染当前选中的一个出口，不保存完整出口列表。
+
+```bash
+./install.sh --add-exit
+./install.sh --list-exits
+./install.sh --set-exit hk
+```
+
+`--add-exit` 默认交互输入出口名、服务器地址、端口、加密方法和密码；非交互时也可以传入 `NAME ADDRESS PORT METHOD PASSWORD` 五个参数。
+
+`--set-exit` 会把 proxy 出口切到本机 Xray SOCKS5，重写当前出口对应的 `/usr/local/etc/xray/config.json`，并重启 Xray、`5gpn-tcp-proxy` 和 `quic-proxy`。
+
 也可以安装后修改：
 
 ```bash

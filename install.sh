@@ -16,6 +16,7 @@ CONF_DIR="${BASE_DIR}/etc"
 LOG_DIR="${BASE_DIR}/log"
 SRC_DIR="${BASE_DIR}/src"
 WWW_DIR="${BASE_DIR}/www"
+EXITS_DIR="${CONF_DIR}/exits"
 GFWLIST_URL="https://raw.githubusercontent.com/gfwlist/gfwlist/master/gfwlist.txt"
 CHINALIST_URL="https://raw.githubusercontent.com/felixonmars/dnsmasq-china-list/master/accelerated-domains.china.conf"
 DEFAULT_OVERSEAS_DNS=("1.1.1.1" "8.8.8.8" "9.9.9.9")
@@ -30,6 +31,7 @@ EGRESS_SOCKS5_ADDR="${EGRESS_SOCKS5_ADDR:-127.0.0.1:1080}"
 EGRESS_SOCKS5_USERNAME="${EGRESS_SOCKS5_USERNAME:-}"
 EGRESS_SOCKS5_PASSWORD="${EGRESS_SOCKS5_PASSWORD:-}"
 XRAY_INSTALL="${XRAY_INSTALL:-}"
+EXIT_NAME="${EXIT_NAME:-}"
 SS2022_ADDRESS="${SS2022_ADDRESS:-}"
 SS2022_PORT="${SS2022_PORT:-}"
 SS2022_METHOD="${SS2022_METHOD:-}"
@@ -501,19 +503,26 @@ configure_xray_policy() {
     fi
 
     if [[ -t 0 ]]; then
+        if [[ -z "$EXIT_NAME" ]]; then
+            read -r -p "SS2022 exit name [default]: " EXIT_NAME
+            [[ -z "$EXIT_NAME" ]] && EXIT_NAME="default"
+        fi
         [[ -z "$SS2022_ADDRESS" ]] && SS2022_ADDRESS="$(prompt_required "SS2022 server address: ")"
         [[ -z "$SS2022_PORT" ]] && SS2022_PORT="$(prompt_required "SS2022 server port: ")"
         [[ -z "$SS2022_METHOD" ]] && SS2022_METHOD="$(prompt_required "SS2022 method: ")"
         [[ -z "$SS2022_PASSWORD" ]] && SS2022_PASSWORD="$(prompt_required "SS2022 password: ")"
     fi
 
+    [[ -n "$EXIT_NAME" ]] || EXIT_NAME="default"
     [[ -n "$SS2022_ADDRESS" ]] || { err "SS2022_ADDRESS is required when XRAY_INSTALL=yes."; exit 1; }
     [[ "$SS2022_PORT" =~ ^[0-9]+$ ]] || { err "SS2022_PORT must be a number."; exit 1; }
     (( SS2022_PORT >= 1 && SS2022_PORT <= 65535 )) || { err "SS2022_PORT must be between 1 and 65535."; exit 1; }
     [[ -n "$SS2022_METHOD" ]] || { err "SS2022_METHOD is required when XRAY_INSTALL=yes."; exit 1; }
     [[ -n "$SS2022_PASSWORD" ]] || { err "SS2022_PASSWORD is required when XRAY_INSTALL=yes."; exit 1; }
 
-    info "Xray will listen on SOCKS5 ${EGRESS_SOCKS5_ADDR} and forward to SS2022 ${SS2022_ADDRESS}:${SS2022_PORT}"
+    save_ss2022_exit "$EXIT_NAME" "$SS2022_ADDRESS" "$SS2022_PORT" "$SS2022_METHOD" "$SS2022_PASSWORD"
+    write_current_exit "$EXIT_NAME"
+    info "Xray will listen on SOCKS5 ${EGRESS_SOCKS5_ADDR} and forward to SS2022 exit ${EXIT_NAME} (${SS2022_ADDRESS}:${SS2022_PORT})"
 }
 
 render_xray_config() {
@@ -577,6 +586,187 @@ PYEOF
     # The official Xray service may run as a non-root user, so the config must
     # be readable by that service account while remaining writable only by root.
     chmod 644 /usr/local/etc/xray/config.json
+}
+
+validate_exit_name() {
+    local name="$1"
+    [[ "$name" =~ ^[A-Za-z0-9._-]{1,64}$ ]] || return 1
+}
+
+exit_config_path() {
+    local name="$1"
+    printf '%s/%s.json\n' "$EXITS_DIR" "$name"
+}
+
+save_ss2022_exit() {
+    local name="$1" address="$2" port="$3" method="$4" password="$5"
+
+    validate_exit_name "$name" || { err "Invalid exit name: ${name}. Use letters, numbers, dot, underscore, or dash."; exit 1; }
+    [[ -n "$address" ]] || { err "SS2022 address is required."; exit 1; }
+    [[ "$port" =~ ^[0-9]+$ ]] || { err "SS2022 port must be a number."; exit 1; }
+    (( port >= 1 && port <= 65535 )) || { err "SS2022 port must be between 1 and 65535."; exit 1; }
+    [[ -n "$method" ]] || { err "SS2022 method is required."; exit 1; }
+    [[ -n "$password" ]] || { err "SS2022 password is required."; exit 1; }
+
+    mkdir -p "$EXITS_DIR"
+    python3 - "$name" "$address" "$port" "$method" "$password" "$(exit_config_path "$name")" <<'PYEOF'
+import json
+import os
+import sys
+from datetime import datetime, timezone
+
+name, address, port, method, password, output = sys.argv[1:]
+data = {
+    "name": name,
+    "type": "ss2022",
+    "address": address,
+    "port": int(port),
+    "method": method,
+    "password": password,
+    "updated_at": datetime.now(timezone.utc).isoformat(),
+}
+tmp = output + ".tmp"
+with open(tmp, "w", encoding="utf-8") as fh:
+    json.dump(data, fh, ensure_ascii=False, indent=2)
+    fh.write("\n")
+os.replace(tmp, output)
+PYEOF
+    chmod 600 "$(exit_config_path "$name")"
+}
+
+load_ss2022_exit() {
+    local name="$1" path
+    validate_exit_name "$name" || { err "Invalid exit name: ${name}"; exit 1; }
+    path="$(exit_config_path "$name")"
+    [[ -f "$path" ]] || { err "Exit not found: ${name}"; exit 1; }
+
+    eval "$(python3 - "$path" <<'PYEOF'
+import json
+import shlex
+import sys
+
+with open(sys.argv[1], "r", encoding="utf-8") as fh:
+    data = json.load(fh)
+if data.get("type") != "ss2022":
+    raise SystemExit("Only ss2022 exits are supported")
+for key, env in [
+    ("name", "EXIT_NAME"),
+    ("address", "SS2022_ADDRESS"),
+    ("port", "SS2022_PORT"),
+    ("method", "SS2022_METHOD"),
+    ("password", "SS2022_PASSWORD"),
+]:
+    print(f"{env}={shlex.quote(str(data.get(key, '')))}")
+PYEOF
+)"
+}
+
+write_current_exit() {
+    local name="$1"
+    validate_exit_name "$name" || { err "Invalid exit name: ${name}"; exit 1; }
+    mkdir -p "$CONF_DIR"
+    echo "$name" > "${CONF_DIR}/.current_exit"
+    chmod 600 "${CONF_DIR}/.current_exit"
+}
+
+list_exits() {
+    check_root
+    local current=""
+    [[ -f "${CONF_DIR}/.current_exit" ]] && current="$(cat "${CONF_DIR}/.current_exit" 2>/dev/null || true)"
+
+    if [[ ! -d "$EXITS_DIR" ]] || ! ls "$EXITS_DIR"/*.json >/dev/null 2>&1; then
+        echo "No SS2022 exits configured."
+        return 0
+    fi
+
+    python3 - "$EXITS_DIR" "$current" <<'PYEOF'
+import glob
+import json
+import os
+import sys
+
+exits_dir, current = sys.argv[1:]
+for path in sorted(glob.glob(os.path.join(exits_dir, "*.json"))):
+    with open(path, "r", encoding="utf-8") as fh:
+        data = json.load(fh)
+    if data.get("type") != "ss2022":
+        continue
+    mark = "*" if data.get("name") == current else " "
+    print(f"{mark} {data.get('name')} ss2022 {data.get('address')}:{data.get('port')} {data.get('method')}")
+PYEOF
+}
+
+restart_egress_services() {
+    systemctl daemon-reload
+    if [[ -f "${CONF_DIR}/.xray_managed" ]]; then
+        systemctl restart xray || { err "xray failed to start"; journalctl -u xray --no-pager -n 30; exit 1; }
+    fi
+    systemctl stop sniproxy 2>/dev/null || true
+    systemctl enable 5gpn-tcp-proxy quic-proxy 2>/dev/null || true
+    systemctl restart 5gpn-tcp-proxy || { err "5gpn-tcp-proxy failed to start"; journalctl -u 5gpn-tcp-proxy --no-pager -n 20; exit 1; }
+    systemctl restart quic-proxy || { err "quic-proxy failed to start"; journalctl -u quic-proxy --no-pager -n 20; exit 1; }
+}
+
+activate_exit() {
+    local name="$1" restart_services="${2:-yes}"
+    load_ss2022_exit "$name"
+
+    EGRESS_MODE="socks5"
+    EGRESS_SOCKS5_ADDR="${EGRESS_SOCKS5_ADDR:-127.0.0.1:1080}"
+    EGRESS_SOCKS5_USERNAME=""
+    EGRESS_SOCKS5_PASSWORD=""
+    write_egress_env
+    write_current_exit "$name"
+
+    XRAY_INSTALL="yes"
+    if ! xray_installed; then
+        install_xray_if_requested
+    else
+        render_xray_config
+        mkdir -p "$CONF_DIR"
+        touch "${CONF_DIR}/.xray_managed"
+        systemctl enable xray >/dev/null 2>&1 || true
+    fi
+
+    if [[ "$restart_services" == "yes" ]]; then
+        restart_egress_services
+    fi
+    ok "Active SS2022 exit: ${name} (${SS2022_ADDRESS}:${SS2022_PORT})"
+}
+
+add_exit_command() {
+    check_root
+    local name="${1:-${EXIT_NAME:-}}" address="${2:-${SS2022_ADDRESS:-}}" port="${3:-${SS2022_PORT:-}}" method="${4:-${SS2022_METHOD:-}}" password="${5:-${SS2022_PASSWORD:-}}"
+
+    if [[ -t 0 ]]; then
+        [[ -z "$name" ]] && name="$(prompt_required "Exit name: ")"
+        [[ -z "$address" ]] && address="$(prompt_required "SS2022 server address: ")"
+        [[ -z "$port" ]] && port="$(prompt_required "SS2022 server port: ")"
+        [[ -z "$method" ]] && method="$(prompt_required "SS2022 method: ")"
+        [[ -z "$password" ]] && password="$(prompt_required "SS2022 password: ")"
+    fi
+
+    [[ -n "$name" && -n "$address" && -n "$port" && -n "$method" && -n "$password" ]] || {
+        err "Missing SS2022 exit fields. Run interactively, or provide: $0 --add-exit NAME ADDRESS PORT METHOD PASSWORD"
+        exit 1
+    }
+
+    save_ss2022_exit "$name" "$address" "$port" "$method" "$password"
+    if [[ ! -f "${CONF_DIR}/.current_exit" ]]; then
+        write_current_exit "$name"
+        note "No active exit was set; ${name} is now marked as current. Run $0 --set-exit ${name} to apply it."
+    fi
+    ok "SS2022 exit saved: ${name}"
+}
+
+set_exit_command() {
+    check_root
+    local name="${1:-${EXIT_NAME:-}}"
+    if [[ -z "$name" && -t 0 ]]; then
+        name="$(prompt_required "Exit name to activate: ")"
+    fi
+    [[ -n "$name" ]] || { err "Usage: $0 --set-exit NAME"; exit 1; }
+    activate_exit "$name" "yes"
 }
 
 xray_installed() {
@@ -688,6 +878,10 @@ Options:
   --status       Show service status
   --update-rules Update GFWList/ChinaList/custom rules and restart mosdns
   --renew-cert   Force renew certificates and reload services
+  --add-exit     Interactively save an SS2022 exit without changing active traffic
+  --list-exits   List configured SS2022 exits
+  --set-exit NAME
+                 Activate one saved SS2022 exit and restart egress services
   --uninstall    Remove all installed components
   -h, --help     Show this help
 
@@ -705,6 +899,7 @@ Environment variables (for non-interactive use):
   EGRESS_SOCKS5_USERNAME  Optional SOCKS5 username
   EGRESS_SOCKS5_PASSWORD  Optional SOCKS5 password
   XRAY_INSTALL  Install local Xray SOCKS5 -> SS2022 outbound when set to 1/yes
+  EXIT_NAME      Name for an SS2022 exit, default: default
   SS2022_ADDRESS Required SS2022 server address when XRAY_INSTALL=yes
   SS2022_PORT    Required SS2022 server port when XRAY_INSTALL=yes
   SS2022_METHOD  Required SS2022 method when XRAY_INSTALL=yes
@@ -1952,6 +2147,9 @@ show_status() {
     if [[ -f "${CONF_DIR}/egress.env" ]]; then
         echo "TCP egress: $(grep -E '^EGRESS_MODE=' "${CONF_DIR}/egress.env" | cut -d= -f2-) ($(grep -E '^EGRESS_SOCKS5_ADDR=' "${CONF_DIR}/egress.env" | cut -d= -f2-))"
     fi
+    if [[ -f "${CONF_DIR}/.current_exit" ]]; then
+        echo "Active exit: $(cat "${CONF_DIR}/.current_exit")"
+    fi
     echo "=========================================="
 }
 
@@ -2126,6 +2324,17 @@ case "${1:-}" in
         ;;
     --renew-cert)
         force_renew_cert
+        ;;
+    --add-exit)
+        shift
+        add_exit_command "$@"
+        ;;
+    --list-exits)
+        list_exits
+        ;;
+    --set-exit)
+        shift
+        set_exit_command "$@"
         ;;
     --uninstall)
         do_uninstall
