@@ -24,7 +24,7 @@ UE / 终端
 | 网络 | 公网 IPv4，域名 A 记录指向该 IP |
 | 权限 | 必须以 `root` 运行 |
 
-安装脚本默认使用 nftables 管理防火墙，并会把 SSH 端口配置为 `26941`。
+安装脚本默认使用 nftables 管理防火墙，并默认保留 SSH 端口 `22`；交互安装时可选择改为自定义端口。
 
 ## 核心组件
 
@@ -44,7 +44,7 @@ UE / 终端
 - DoT 853：允许所有来源访问，但只有 `172.22.0.0/16` 会获得代理劫持结果。
 - TCP 80/443：仅允许 `172.22.0.0/16` 访问 sniproxy。
 - UDP 443：仅允许 `172.22.0.0/16` 访问 quic-proxy。
-- SSH：默认端口 `26941`。
+- SSH：默认端口 `22`，交互安装时可选择修改。
 
 | 来源 IP | proxy/GFWList 域名 | china/ChinaList 域名 | direct/默认域名 |
 |---------|--------------------|----------------------|-----------------|
@@ -140,7 +140,7 @@ export NPN_CLIENT_CIDRS="172.22.0.0/16"
 | china | `/etc/mosdns/subscriptions/china-urls.txt` |
 | reject | `/etc/mosdns/subscriptions/reject-urls.txt` |
 
-每行一个域名或一个订阅 URL，支持 `#` 注释。执行后会合并去重：
+每行一个订阅 URL，URL 内容支持纯域名列表、Adblock `||example.com^`、Clash/Surge/Quantumult `DOMAIN,example.com,Proxy` / `DOMAIN-SUFFIX,example.com,Proxy` / `DOMAIN-KEYWORD,example.com,Proxy`，以及 dnsmasq `server=/example.com/114.114.114.114` / `address=/example.com/1.2.3.4` / `ipset=/example.com/tag` 格式。执行后会规范化域名并合并去重：
 
 ```bash
 ./install.sh --update-rules

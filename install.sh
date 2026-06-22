@@ -22,7 +22,8 @@ DEFAULT_OVERSEAS_DNS=("1.1.1.1" "8.8.8.8" "9.9.9.9")
 DEFAULT_PUBLIC_OVERSEAS_DNS=("1.1.1.1" "8.8.8.8")
 DEFAULT_NPN_CLIENT_CIDRS=("172.22.0.0/16")
 MOSDNS_VERSION="${MOSDNS_VERSION:-latest}"
-SSH_PORT="${SSH_PORT:-26941}"
+SSH_PORT_CONFIGURED="${SSH_PORT:-}"
+SSH_PORT="${SSH_PORT_CONFIGURED:-22}"
 NPN_CLIENT_CIDRS="${NPN_CLIENT_CIDRS:-}"
 EGRESS_MODE="${EGRESS_MODE:-direct}"
 EGRESS_SOCKS5_ADDR="${EGRESS_SOCKS5_ADDR:-127.0.0.1:1080}"
@@ -342,6 +343,48 @@ normalize_yes_no() {
         n|no|0|false|off|"") value="no" ;;
     esac
     printf '%s\n' "$value"
+}
+
+validate_ssh_port() {
+    local port="$1"
+    [[ "$port" =~ ^[0-9]+$ ]] || return 1
+    (( port >= 1 && port <= 65535 )) || return 1
+}
+
+configure_ssh_policy() {
+    local selected="${SSH_PORT:-22}"
+    local input change_port
+
+    if [[ -t 0 ]]; then
+        echo ""
+        if [[ -n "${SSH_PORT_CONFIGURED:-}" ]]; then
+            read -r -p "SSH port [${selected}]: " input
+            if [[ -n "$input" ]]; then
+                selected="$input"
+            fi
+        else
+            read -r -p "Change SSH port from default 22? [y/N]: " change_port
+            change_port="$(normalize_yes_no "$change_port")"
+            if [[ "$change_port" == "yes" ]]; then
+                read -r -p "SSH port [${selected}]: " input
+                if [[ -n "$input" ]]; then
+                    selected="$input"
+                fi
+            else
+                selected="22"
+            fi
+        fi
+    fi
+
+    if ! validate_ssh_port "$selected"; then
+        err "Invalid SSH_PORT: ${selected}"
+        exit 1
+    fi
+
+    SSH_PORT="$selected"
+    mkdir -p "$CONF_DIR"
+    echo "$SSH_PORT" > "${CONF_DIR}/.ssh_port"
+    info "SSH port allowed by firewall: ${SSH_PORT}"
 }
 
 split_host_port() {
@@ -1692,7 +1735,7 @@ EOF
 configure_ssh_port() {
     info "Configuring SSH daemon port: ${SSH_PORT}"
 
-    if [[ ! "$SSH_PORT" =~ ^[0-9]+$ ]] || [[ "$SSH_PORT" -lt 1 ]] || [[ "$SSH_PORT" -gt 65535 ]]; then
+    if ! validate_ssh_port "$SSH_PORT"; then
         err "Invalid SSH_PORT: ${SSH_PORT}"
         exit 1
     fi
@@ -1745,7 +1788,7 @@ setup_firewall() {
         exit 1
     fi
 
-    cat > /etc/nftables.conf <<'EOF'
+    cat > /etc/nftables.conf <<EOF
 #!/usr/sbin/nft -f
 flush ruleset
 
@@ -1765,7 +1808,7 @@ table ip filter {
                 ct state established,related accept
                 icmp type echo-request accept
                 icmp type echo-reply accept
-                tcp dport 26941 accept
+                tcp dport ${SSH_PORT} accept
                 ip saddr 172.22.0.0/16 tcp dport 53 accept
                 ip saddr 172.22.0.0/16 udp dport 53 accept
                 tcp dport 853 accept
@@ -2036,6 +2079,7 @@ main_install() {
 
     phase "Apply host tuning and firewall policy"
     system_tuning
+    configure_ssh_policy
     configure_ssh_port
     setup_firewall
 

@@ -21,11 +21,14 @@ Assert-Contains $install 'ip saddr 172.22.0.0/16 udp dport 443 accept' 'nft UDP 
 Assert-Contains $install 'table ip nat {' 'nft nat table exists'
 Assert-Contains $install 'table ip filter {' 'nft ip filter table exists'
 Assert-Contains $install 'type filter hook input priority filter; policy drop;' 'nft input default drop'
-Assert-Contains $install 'SSH_PORT="${SSH_PORT:-26941}"' 'default SSH port variable'
+Assert-Contains $install 'SSH_PORT_CONFIGURED="${SSH_PORT:-}"' 'configured SSH port capture'
+Assert-Contains $install 'SSH_PORT="${SSH_PORT_CONFIGURED:-22}"' 'default SSH port variable'
+Assert-Contains $install 'configure_ssh_policy()' 'interactive SSH port policy function'
+Assert-Contains $install 'Change SSH port from default 22? [y/N]:' 'interactive SSH port prompt'
 Assert-Contains $install 'configure_ssh_port()' 'SSH daemon port configuration function'
 Assert-Contains $install 'Port ${SSH_PORT}' 'SSH daemon port drop-in'
 Assert-Contains $install 'sshd -t' 'SSH daemon config validation'
-Assert-Contains $install 'tcp dport 26941 accept' 'SSH custom port allow'
+Assert-Contains $install 'tcp dport ${SSH_PORT} accept' 'selected SSH port allow'
 Assert-Contains $install 'ip saddr 172.22.0.0/16 tcp dport 53 accept' 'nft DNS/53 TCP private allow'
 Assert-Contains $install 'ip saddr 172.22.0.0/16 udp dport 53 accept' 'nft DNS/53 UDP private allow'
 Assert-Contains $install 'tcp dport 853 accept' 'DoT public allow'
@@ -41,8 +44,8 @@ Assert-Contains $readme '172.22.0.0/16' 'README documents reverse proxy whitelis
 Assert-Contains $readme '80/443' 'README documents reverse proxy ports'
 Assert-Contains $readme '443' 'README documents reverse proxy port'
 
-if ($install.Contains('tcp dport 22 accept') -or $install.Contains('tcp dport 8111 accept')) {
-    throw "Firewall must not open default SSH 22 or old iOS profile 8111 ports"
+if ($install.Contains('tcp dport 26941 accept') -or $install.Contains('tcp dport 8111 accept')) {
+    throw "Firewall must not hard-code the old SSH 26941 or old iOS profile 8111 ports"
 }
 
 Write-Output "reverse proxy firewall markers OK"

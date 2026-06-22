@@ -91,10 +91,13 @@ download_rules_file() {
 trim_domain() {
     local domain="$1"
     domain="${domain%%#*}"
+    domain="${domain%%,*}"
     domain="${domain%%/*}"
+    domain="${domain#||}"
     domain="${domain#\.}"
     domain="${domain#\*.}"
     domain="${domain#www.}"
+    domain="${domain%\^}"
     domain="${domain%.}"
     domain="$(echo "$domain" | tr -d '\r' | xargs 2>/dev/null || true)"
     [[ "$domain" =~ ^[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?)+$ ]] || return 1
@@ -106,18 +109,60 @@ normalize_domain_file() {
     local output="$2"
 
     awk '
+        function trim(s) {
+            gsub(/\r/, "", s)
+            gsub(/^[[:space:]]+|[[:space:]]+$/, "", s)
+            return s
+        }
+        function emit(raw, value) {
+            value = tolower(trim(raw))
+            sub(/^'\''/, "", value)
+            sub(/'\''$/, "", value)
+            sub(/^"/, "", value)
+            sub(/"$/, "", value)
+            sub(/^\+\./, "", value)
+            sub(/^\|\|/, "", value)
+            sub(/^\*\./, "", value)
+            sub(/^\./, "", value)
+            sub(/^www\./, "", value)
+            sub(/\^$/, "", value)
+            sub(/\.$/, "", value)
+            if (value ~ /^[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?)+$/) {
+                print value
+            }
+        }
         {
             sub(/\r$/, "")
             sub(/#.*/, "")
-            sub(/\/.*/, "")
-            gsub(/^[[:space:]]+|[[:space:]]+$/, "")
-            sub(/^\*\./, "")
-            sub(/^\./, "")
-            sub(/^www\./, "")
-            sub(/\.$/, "")
-            if ($0 ~ /^[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?(\.[A-Za-z0-9]([A-Za-z0-9_-]*[A-Za-z0-9])?)+$/) {
-                print tolower($0)
+            line = trim($0)
+            if (line == "" || line ~ /^!/) next
+
+            if (line ~ /^\|\|/) {
+                sub(/^\|\|/, "", line)
+                sub(/\^.*/, "", line)
+                sub(/\/.*/, "", line)
+                emit(line)
+                next
             }
+
+            split(line, parts, ",")
+            kind = toupper(trim(parts[1]))
+            sub(/^- */, "", kind)
+            if (kind == "DOMAIN" || kind == "DOMAIN-SUFFIX" || kind == "DOMAIN-KEYWORD" || kind == "HOST" || kind == "HOST-SUFFIX") {
+                emit(parts[2])
+                next
+            }
+
+            if (line ~ /^server=\// || line ~ /^address=\// || line ~ /^ipset=\// || line ~ /^nftset=\//) {
+                split(line, dnsmasq, "/")
+                emit(dnsmasq[2])
+                next
+            }
+
+            if (line ~ /^\[/) next
+
+            sub(/\/.*/, "", line)
+            emit(line)
         }
     ' "$input" >> "$output"
 }
