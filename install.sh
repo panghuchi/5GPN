@@ -707,6 +707,23 @@ restart_egress_services() {
     systemctl restart quic-proxy || { err "quic-proxy failed to start"; journalctl -u quic-proxy --no-pager -n 20; exit 1; }
 }
 
+activate_direct_egress() {
+    check_root
+    EGRESS_MODE="direct"
+    EGRESS_SOCKS5_ADDR="${EGRESS_SOCKS5_ADDR:-127.0.0.1:1080}"
+    EGRESS_SOCKS5_USERNAME=""
+    EGRESS_SOCKS5_PASSWORD=""
+    write_egress_env
+
+    systemctl daemon-reload
+    systemctl stop 5gpn-tcp-proxy 2>/dev/null || true
+    systemctl disable 5gpn-tcp-proxy 2>/dev/null || true
+    systemctl enable sniproxy quic-proxy 2>/dev/null || true
+    systemctl restart sniproxy || { err "sniproxy failed to start"; journalctl -u sniproxy --no-pager -n 20; exit 1; }
+    systemctl restart quic-proxy || { err "quic-proxy failed to start"; journalctl -u quic-proxy --no-pager -n 20; exit 1; }
+    ok "Proxy egress switched to direct"
+}
+
 activate_exit() {
     local name="$1" restart_services="${2:-yes}"
     load_ss2022_exit "$name"
@@ -767,6 +784,29 @@ set_exit_command() {
     fi
     [[ -n "$name" ]] || { err "Usage: $0 --set-exit NAME"; exit 1; }
     activate_exit "$name" "yes"
+}
+
+set_egress_command() {
+    check_root
+    local mode="${1:-}" name="${2:-${EXIT_NAME:-}}"
+    [[ -n "$mode" ]] || { err "Usage: $0 --set-egress direct|socks5 [EXIT_NAME]"; exit 1; }
+    mode="$(normalize_egress_mode "$mode")"
+    case "$mode" in
+        direct)
+            activate_direct_egress
+            ;;
+        socks5)
+            if [[ -z "$name" && -f "${CONF_DIR}/.current_exit" ]]; then
+                name="$(cat "${CONF_DIR}/.current_exit" 2>/dev/null || true)"
+            fi
+            [[ -n "$name" ]] || { err "Usage: $0 --set-egress socks5 EXIT_NAME"; exit 1; }
+            activate_exit "$name" "yes"
+            ;;
+        *)
+            err "Invalid egress mode: ${mode}. Use direct or socks5."
+            exit 1
+            ;;
+    esac
 }
 
 delete_exit_command() {
@@ -908,6 +948,9 @@ Options:
   --list-exits   List configured SS2022 exits
   --set-exit NAME
                  Activate one saved SS2022 exit and restart egress services
+  --set-egress direct|socks5 [EXIT_NAME]
+                 Switch runtime proxy egress mode
+  --set-direct   Shortcut for --set-egress direct
   --delete-exit NAME
                  Delete one saved SS2022 exit; active exit cannot be deleted
   --uninstall    Remove all installed components
@@ -2173,9 +2216,12 @@ show_status() {
     fi
     echo "Public IP: ${PUBLIC_IP:-N/A}"
     if [[ -f "${CONF_DIR}/egress.env" ]]; then
-        echo "TCP egress: $(grep -E '^EGRESS_MODE=' "${CONF_DIR}/egress.env" | cut -d= -f2-) ($(grep -E '^EGRESS_SOCKS5_ADDR=' "${CONF_DIR}/egress.env" | cut -d= -f2-))"
+        local current_egress current_socks
+        current_egress="$(grep -E '^EGRESS_MODE=' "${CONF_DIR}/egress.env" | cut -d= -f2-)"
+        current_socks="$(grep -E '^EGRESS_SOCKS5_ADDR=' "${CONF_DIR}/egress.env" | cut -d= -f2-)"
+        echo "TCP egress: ${current_egress} (${current_socks})"
     fi
-    if [[ -f "${CONF_DIR}/.current_exit" ]]; then
+    if [[ "${current_egress:-}" == "socks5" && -f "${CONF_DIR}/.current_exit" ]]; then
         echo "Active exit: $(cat "${CONF_DIR}/.current_exit")"
     fi
     echo "=========================================="
@@ -2426,6 +2472,13 @@ case "${1:-}" in
     --set-exit)
         shift
         set_exit_command "$@"
+        ;;
+    --set-egress)
+        shift
+        set_egress_command "$@"
+        ;;
+    --set-direct)
+        activate_direct_egress
         ;;
     --delete-exit|--del-exit|--remove-exit)
         shift

@@ -218,12 +218,15 @@ bash -c "$(curl -fsSL https://raw.githubusercontent.com/panghuchi/5GPN/main/inst
 ./install.sh --add-exit
 ./install.sh --list-exits
 ./install.sh --set-exit hk
+./install.sh --set-egress direct
 ./install.sh --delete-exit jp
 ```
 
 `--add-exit` 默认交互输入出口名、服务器地址、端口、加密方法和密码；非交互时也可以传入 `NAME ADDRESS PORT METHOD PASSWORD` 五个参数。
 
 `--set-exit` 会把 proxy 出口切到本机 Xray SOCKS5，重写当前出口对应的 `/usr/local/etc/xray/config.json`，并重启 Xray、`5gpn-tcp-proxy` 和 `quic-proxy`。
+
+`--set-egress direct` 会从 SOCKS5/SS2022 切回 direct 模式，停止并禁用 `5gpn-tcp-proxy`，启用并重启 `sniproxy`，同时重启 `quic-proxy` 让 UDP 443 也走 direct。
 
 `--delete-exit` 只删除未启用的出口；当前正在使用的出口需要先切换到其它出口后再删除。
 

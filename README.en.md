@@ -218,12 +218,15 @@ Multiple SS2022 exits can be saved and switched after installation. The inventor
 ./install.sh --add-exit
 ./install.sh --list-exits
 ./install.sh --set-exit hk
+./install.sh --set-egress direct
 ./install.sh --delete-exit jp
 ```
 
 `--add-exit` prompts for exit name, server address, port, method, and password. Non-interactive use can still pass `NAME ADDRESS PORT METHOD PASSWORD`.
 
 `--set-exit` switches proxy egress to the local Xray SOCKS5 listener, rewrites `/usr/local/etc/xray/config.json` for the selected exit, and restarts Xray, `5gpn-tcp-proxy`, and `quic-proxy`.
+
+`--set-egress direct` switches from SOCKS5/SS2022 back to direct mode, stops and disables `5gpn-tcp-proxy`, enables and restarts `sniproxy`, and restarts `quic-proxy` so UDP 443 also uses direct egress.
 
 `--delete-exit` deletes only inactive exits. Switch away from the active exit before deleting it.
 
